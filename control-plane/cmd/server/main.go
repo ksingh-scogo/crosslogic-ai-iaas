@@ -12,7 +12,7 @@ import (
 	"github.com/crosslogic/control-plane/internal/billing"
 	"github.com/crosslogic/control-plane/internal/config"
 	"github.com/crosslogic/control-plane/internal/gateway"
-	"github.com/crosslogic/control-plane/internal/scheduler"
+	"github.com/crosslogic/control-plane/internal/orchestrator"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"go.uber.org/zap"
@@ -50,13 +50,20 @@ func main() {
 	defer redisCache.Close()
 	logger.Info("connected to Redis")
 
-	// Initialize scheduler
-	sched := scheduler.NewScheduler(db, logger)
-	logger.Info("initialized scheduler")
-
 	// Initialize billing engine
 	billingEngine := billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
 	logger.Info("initialized billing engine")
+
+	// Initialize webhook handler
+	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, logger)
+	logger.Info("initialized webhook handler")
+
+	// Initialize SkyPilot orchestrator
+	orch, err := orchestrator.NewSkyPilotOrchestrator(db, logger, cfg.Server.ControlPlaneURL)
+	if err != nil {
+		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
+	}
+	logger.Info("initialized SkyPilot orchestrator")
 
 	// Start billing background jobs
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,7 +71,7 @@ func main() {
 	billingEngine.StartBackgroundJobs(ctx)
 
 	// Initialize API gateway
-	gw := gateway.NewGateway(db, redisCache, logger)
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch)
 	logger.Info("initialized API gateway")
 
 	// Create HTTP server

@@ -19,11 +19,12 @@ type Config struct {
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	Host         string
-	Port         int
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
+	Host            string
+	Port            int
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	IdleTimeout     time.Duration
+	ControlPlaneURL string // Public HTTPS URL for node agent registration
 }
 
 // DatabaseConfig holds database configuration
@@ -50,10 +51,10 @@ type RedisConfig struct {
 
 // BillingConfig holds billing configuration
 type BillingConfig struct {
-	StripeSecretKey      string
-	StripeWebhookSecret  string
-	AggregationInterval  time.Duration
-	ExportInterval       time.Duration
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	AggregationInterval time.Duration
+	ExportInterval      time.Duration
 }
 
 // SecurityConfig holds security configuration
@@ -67,21 +68,22 @@ type SecurityConfig struct {
 
 // MonitoringConfig holds monitoring configuration
 type MonitoringConfig struct {
-	Enabled           bool
-	PrometheusPort    int
-	MetricsPath       string
-	LogLevel          string
+	Enabled        bool
+	PrometheusPort int
+	MetricsPath    string
+	LogLevel       string
 }
 
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
 		Server: ServerConfig{
-			Host:         getEnv("SERVER_HOST", "0.0.0.0"),
-			Port:         getEnvAsInt("SERVER_PORT", 8080),
-			ReadTimeout:  getEnvAsDuration("SERVER_READ_TIMEOUT", "30s"),
-			WriteTimeout: getEnvAsDuration("SERVER_WRITE_TIMEOUT", "30s"),
-			IdleTimeout:  getEnvAsDuration("SERVER_IDLE_TIMEOUT", "120s"),
+			Host:            getEnv("SERVER_HOST", "0.0.0.0"),
+			Port:            getEnvAsInt("SERVER_PORT", 8080),
+			ReadTimeout:     getEnvAsDuration("SERVER_READ_TIMEOUT", "30s"),
+			WriteTimeout:    getEnvAsDuration("SERVER_WRITE_TIMEOUT", "30s"),
+			IdleTimeout:     getEnvAsDuration("SERVER_IDLE_TIMEOUT", "120s"),
+			ControlPlaneURL: getEnv("CONTROL_PLANE_URL", "https://api.crosslogic.ai"),
 		},
 		Database: DatabaseConfig{
 			Host:            getEnv("DB_HOST", "localhost"),
@@ -102,10 +104,10 @@ func LoadConfig() (*Config, error) {
 			PoolSize: getEnvAsInt("REDIS_POOL_SIZE", 10),
 		},
 		Billing: BillingConfig{
-			StripeSecretKey:      getEnv("STRIPE_SECRET_KEY", ""),
-			StripeWebhookSecret:  getEnv("STRIPE_WEBHOOK_SECRET", ""),
-			AggregationInterval:  getEnvAsDuration("BILLING_AGGREGATION_INTERVAL", "1h"),
-			ExportInterval:       getEnvAsDuration("BILLING_EXPORT_INTERVAL", "5m"),
+			StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),
+			StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
+			AggregationInterval: getEnvAsDuration("BILLING_AGGREGATION_INTERVAL", "1h"),
+			ExportInterval:      getEnvAsDuration("BILLING_EXPORT_INTERVAL", "5m"),
 		},
 		Security: SecurityConfig{
 			APIKeyHashRounds: getEnvAsInt("API_KEY_HASH_ROUNDS", 12),
