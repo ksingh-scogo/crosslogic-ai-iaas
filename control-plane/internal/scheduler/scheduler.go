@@ -102,11 +102,11 @@ func (s *Scheduler) GetNodePool() *NodePool {
 
 // ScheduleRequest represents a scheduling request
 type ScheduleRequest struct {
-	Model      string
-	Region     string
-	TenantID   uuid.UUID
-	EnvID      uuid.UUID
-	Reserved   bool
+	Model    string
+	Region   string
+	TenantID uuid.UUID
+	EnvID    uuid.UUID
+	Reserved bool
 }
 
 // filterHealthyNodes filters nodes with good health scores

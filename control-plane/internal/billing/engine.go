@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/crosslogic/control-plane/pkg/database"
-	"github.com/crosslogic/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v76"
 	"github.com/stripe/stripe-go/v76/usagerecord"
@@ -15,11 +14,11 @@ import (
 
 // Engine handles billing operations
 type Engine struct {
-	db         *database.Database
-	logger     *zap.Logger
-	meter      *TokenMeter
-	pricer     *PricingCalculator
-	stripeKey  string
+	db        *database.Database
+	logger    *zap.Logger
+	meter     *TokenMeter
+	pricer    *PricingCalculator
+	stripeKey string
 }
 
 // NewEngine creates a new billing engine
@@ -106,9 +105,9 @@ func (e *Engine) ExportToStripe(ctx context.Context) error {
 
 		// Create Stripe usage record
 		params := &stripe.UsageRecordParams{
-			Quantity:           stripe.Int64(totalTokens),
-			Timestamp:          stripe.Int64(time.Now().Unix()),
-			Action:             stripe.String(string(stripe.UsageRecordActionIncrement)),
+			Quantity:  stripe.Int64(totalTokens),
+			Timestamp: stripe.Int64(time.Now().Unix()),
+			Action:    stripe.String(string(stripe.UsageRecordActionIncrement)),
 		}
 
 		// TODO: Use actual subscription item ID
@@ -116,11 +115,11 @@ func (e *Engine) ExportToStripe(ctx context.Context) error {
 		subscriptionItemID := "si_placeholder"
 
 		_, err = usagerecord.New(&stripe.UsageRecordParams{
-			Params:             stripe.Params{Context: ctx},
-			Quantity:           params.Quantity,
-			Timestamp:          params.Timestamp,
-			Action:             params.Action,
-			SubscriptionItem:   stripe.String(subscriptionItemID),
+			Params:           stripe.Params{Context: ctx},
+			Quantity:         params.Quantity,
+			Timestamp:        params.Timestamp,
+			Action:           params.Action,
+			SubscriptionItem: stripe.String(subscriptionItemID),
 		})
 		if err != nil {
 			e.logger.Error("failed to create Stripe usage record",
