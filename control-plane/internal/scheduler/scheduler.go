@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"time"
 
+	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/models"
 	"github.com/google/uuid"
@@ -18,20 +20,23 @@ type Scheduler struct {
 	logger   *zap.Logger
 	nodePool *NodePool
 	strategy SchedulingStrategy
+	load     *NodeLoadTracker
 }
 
 // SchedulingStrategy defines how nodes are selected
 type SchedulingStrategy interface {
-	SelectNode(nodes []*models.Node) (*models.Node, error)
+	SelectNode(ctx context.Context, nodes []*models.Node) (*models.Node, error)
 }
 
 // NewScheduler creates a new scheduler
-func NewScheduler(db *database.Database, logger *zap.Logger) *Scheduler {
+func NewScheduler(db *database.Database, cache *cache.Cache, logger *zap.Logger) *Scheduler {
+	loadTracker := NewNodeLoadTracker(cache, logger)
 	return &Scheduler{
 		db:       db,
 		logger:   logger,
 		nodePool: NewNodePool(db, logger),
-		strategy: &LeastLoadedStrategy{},
+		strategy: NewLeastLoadedStrategy(loadTracker, logger),
+		load:     loadTracker,
 	}
 }
 
@@ -81,7 +86,7 @@ func (s *Scheduler) ScheduleRequest(ctx context.Context, req *ScheduleRequest) (
 	}
 
 	// Select best node using strategy
-	selectedNode, err := s.strategy.SelectNode(healthyNodes)
+	selectedNode, err := s.strategy.SelectNode(ctx, healthyNodes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select node: %w", err)
 	}
@@ -93,6 +98,30 @@ func (s *Scheduler) ScheduleRequest(ctx context.Context, req *ScheduleRequest) (
 	)
 
 	return selectedNode, nil
+}
+
+// TrackRequestStart increments the in-flight counters for the target node.
+func (s *Scheduler) TrackRequestStart(nodeID uuid.UUID, estimatedTokens int) {
+	if s.load == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	s.load.Increment(ctx, nodeID, estimatedTokens)
+}
+
+// TrackRequestEnd decrements the in-flight counters for the target node.
+func (s *Scheduler) TrackRequestEnd(nodeID uuid.UUID, estimatedTokens int) {
+	if s.load == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	s.load.Decrement(ctx, nodeID, estimatedTokens)
 }
 
 // GetNodePool returns the node pool
@@ -122,22 +151,65 @@ func filterHealthyNodes(nodes []*models.Node) []*models.Node {
 
 // ========== Scheduling Strategies ==========
 
-// LeastLoadedStrategy selects the least loaded node
-type LeastLoadedStrategy struct{}
+// LeastLoadedStrategy selects the node with the lowest concurrency/pending tokens
+type LeastLoadedStrategy struct {
+	tracker *NodeLoadTracker
+	logger  *zap.Logger
+}
 
-func (s *LeastLoadedStrategy) SelectNode(nodes []*models.Node) (*models.Node, error) {
+// NewLeastLoadedStrategy constructs the strategy with an optional load tracker.
+func NewLeastLoadedStrategy(tracker *NodeLoadTracker, logger *zap.Logger) *LeastLoadedStrategy {
+	return &LeastLoadedStrategy{
+		tracker: tracker,
+		logger:  logger,
+	}
+}
+
+func (s *LeastLoadedStrategy) SelectNode(ctx context.Context, nodes []*models.Node) (*models.Node, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available")
 	}
 
-	// Sort by health score (higher is better)
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].HealthScore > nodes[j].HealthScore
+	if s.tracker == nil {
+		sort.Slice(nodes, func(i, j int) bool {
+			return nodes[i].HealthScore > nodes[j].HealthScore
+		})
+		return nodes[0], nil
+	}
+
+	type candidate struct {
+		node    *models.Node
+		active  int64
+		pending int64
+	}
+
+	candidates := make([]candidate, 0, len(nodes))
+	for _, node := range nodes {
+		active, pending, err := s.tracker.GetLoad(ctx, node.ID)
+		if err != nil && s.logger != nil {
+			s.logger.Warn("failed to read node load stats",
+				zap.Error(err),
+				zap.String("node_id", node.ID.String()),
+			)
+		}
+		candidates = append(candidates, candidate{
+			node:    node,
+			active:  active,
+			pending: pending,
+		})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].active == candidates[j].active {
+			if candidates[i].pending == candidates[j].pending {
+				return candidates[i].node.HealthScore > candidates[j].node.HealthScore
+			}
+			return candidates[i].pending < candidates[j].pending
+		}
+		return candidates[i].active < candidates[j].active
 	})
 
-	// Return the healthiest node
-	// In production, this should consider actual load metrics
-	return nodes[0], nil
+	return candidates[0].node, nil
 }
 
 // RoundRobinStrategy selects nodes in round-robin fashion
@@ -145,7 +217,7 @@ type RoundRobinStrategy struct {
 	counter int
 }
 
-func (s *RoundRobinStrategy) SelectNode(nodes []*models.Node) (*models.Node, error) {
+func (s *RoundRobinStrategy) SelectNode(_ context.Context, nodes []*models.Node) (*models.Node, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available")
 	}
@@ -158,7 +230,7 @@ func (s *RoundRobinStrategy) SelectNode(nodes []*models.Node) (*models.Node, err
 // RandomStrategy selects a random node
 type RandomStrategy struct{}
 
-func (s *RandomStrategy) SelectNode(nodes []*models.Node) (*models.Node, error) {
+func (s *RandomStrategy) SelectNode(_ context.Context, nodes []*models.Node) (*models.Node, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available")
 	}
@@ -169,7 +241,7 @@ func (s *RandomStrategy) SelectNode(nodes []*models.Node) (*models.Node, error) 
 // WeightedStrategy selects nodes based on health score weighting
 type WeightedStrategy struct{}
 
-func (s *WeightedStrategy) SelectNode(nodes []*models.Node) (*models.Node, error) {
+func (s *WeightedStrategy) SelectNode(_ context.Context, nodes []*models.Node) (*models.Node, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available")
 	}

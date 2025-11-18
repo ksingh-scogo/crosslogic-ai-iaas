@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -255,10 +256,14 @@ func TestHandleStreaming_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	ctx := context.Background()
-	err := proxy.HandleStreaming(ctx, node, req, w, reqBody)
+	usage, err := proxy.HandleStreaming(ctx, node, req, w, reqBody)
 
 	if err != nil {
 		t.Fatalf("HandleStreaming failed: %v", err)
+	}
+
+	if usage != nil {
+		t.Errorf("Expected no usage metrics, got %+v", usage)
 	}
 
 	// Verify streaming response
@@ -270,6 +275,47 @@ func TestHandleStreaming_Success(t *testing.T) {
 	body, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(body), "Hello") {
 		t.Error("Response doesn't contain streamed content")
+	}
+}
+
+func TestHandleStreaming_UsageCaptured(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		chunks := []string{
+			`data: {"choices":[{"delta":{"content":"test"}}]}`,
+			`data: {"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`,
+			`data: [DONE]`,
+		}
+		for _, chunk := range chunks {
+			w.Write([]byte(chunk + "\n\n"))
+			flusher.Flush()
+		}
+	}))
+	defer mockServer.Close()
+
+	logger := zap.NewNop()
+	proxy := NewVLLMProxy(logger)
+
+	node := &models.Node{
+		ID:          uuid.New(),
+		EndpointURL: mockServer.URL,
+		Status:      "active",
+	}
+
+	reqBody := []byte(`{"model":"test","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
+	rec := httptest.NewRecorder()
+
+	usage, err := proxy.HandleStreaming(context.Background(), node, req, rec, reqBody)
+	if err != nil {
+		t.Fatalf("HandleStreaming failed: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("Expected usage metrics to be captured")
+	}
+	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 || usage.TotalTokens != 12 {
+		t.Errorf("Unexpected usage metrics: %+v", usage)
 	}
 }
 
@@ -314,8 +360,8 @@ func TestCircuitBreaker_TripsAfterFailures(t *testing.T) {
 // TestCircuitBreaker_ResetsAfterTimeout tests circuit breaker reset
 // Note: This test is skipped by default due to 30s timeout. Run with -short=false to enable.
 func TestCircuitBreaker_ResetsAfterTimeout(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping circuit breaker timeout test in short mode")
+	if os.Getenv("RUN_LONG_TESTS") == "" {
+		t.Skip("Skipping long-running circuit breaker test. Set RUN_LONG_TESTS=1 to enable.")
 	}
 
 	// Create a successful mock server for recovery testing

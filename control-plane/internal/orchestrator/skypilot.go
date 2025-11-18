@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"text/template"
 	"time"
 
@@ -55,6 +57,10 @@ type SkyPilotOrchestrator struct {
 
 	// controlPlaneURL is the HTTPS endpoint for node agent registration
 	controlPlaneURL string
+
+	// runtime versions for dependency pinning
+	vllmVersion  string
+	torchVersion string
 }
 
 // NodeConfig defines the configuration for launching a new GPU node.
@@ -141,7 +147,7 @@ setup: |
 
   # Install vLLM with CUDA 12.1 support
   pip install --upgrade pip setuptools wheel
-  pip install vllm==0.2.7 torch==2.1.2
+  pip install vllm=={{.VLLMVersion}} torch=={{.TorchVersion}}
 
   echo "=== Downloading CrossLogic Node Agent ==="
   # Download node agent binary
@@ -171,7 +177,9 @@ run: |
     --gpu-memory-utilization 0.9 \
     --max-num-seqs 256 \
     --disable-log-requests \
+{{- if .VLLMArgs }}
     {{.VLLMArgs}} \
+{{- end}}
     > /tmp/vllm.log 2>&1 &
 
   VLLM_PID=$!
@@ -233,7 +241,7 @@ run: |
 //	    logger,
 //	    "https://api.crosslogic.ai",
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL string) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
@@ -245,6 +253,8 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		db:              db,
 		logger:          logger,
 		controlPlaneURL: controlPlaneURL,
+		vllmVersion:     vllmVersion,
+		torchVersion:    torchVersion,
 	}, nil
 }
 
@@ -314,10 +324,10 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 	clusterName := fmt.Sprintf("cic-%s", config.NodeID)
 	cmd := exec.CommandContext(ctx, "sky", "launch",
 		"-c", clusterName, // Cluster name
-		taskFile,          // Task file
-		"-y",              // Auto-confirm
-		"--down",          // Terminate on job completion
-		"--detach-run",    // Detach after launch
+		taskFile,       // Task file
+		"-y",           // Auto-confirm
+		"--down",       // Terminate on job completion
+		"--detach-run", // Detach after launch
 	)
 
 	// Capture output for debugging
@@ -529,6 +539,13 @@ func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 		config.DiskSize = 256 // 256GB default
 	}
 
+	// Sanitize optional VLLM args
+	cleanArgs, err := sanitizeVLLMArgs(config.VLLMArgs)
+	if err != nil {
+		return err
+	}
+	config.VLLMArgs = cleanArgs
+
 	// UseSpot defaults to true (not set in struct, Go zero value is false)
 	// So we need to explicitly check if it was provided
 	// For simplicity, we'll document that UseSpot=false means on-demand
@@ -536,20 +553,42 @@ func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 	return nil
 }
 
+var allowedVLLMArgPattern = regexp.MustCompile(`^[a-zA-Z0-9@./_=:-]+$`)
+
+func sanitizeVLLMArgs(args string) (string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "", nil
+	}
+
+	fields := strings.Fields(args)
+	sanitized := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if !allowedVLLMArgPattern.MatchString(field) {
+			return "", fmt.Errorf("invalid vLLM argument: %s", field)
+		}
+		sanitized = append(sanitized, fmt.Sprintf("'%s'", field))
+	}
+
+	return strings.Join(sanitized, " "), nil
+}
+
 // generateTaskYAML generates SkyPilot task YAML from configuration.
 func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig) (string, error) {
 	// Prepare template data
 	data := map[string]interface{}{
-		"NodeID":           config.NodeID,
-		"Provider":         config.Provider,
-		"Region":           config.Region,
-		"GPU":              config.GPU,
-		"Model":            config.Model,
-		"UseSpot":          config.UseSpot,
-		"DiskSize":         config.DiskSize,
-		"VLLMArgs":         config.VLLMArgs,
-		"ControlPlaneURL":  o.controlPlaneURL,
-		"Timestamp":        time.Now().Format(time.RFC3339),
+		"NodeID":          config.NodeID,
+		"Provider":        config.Provider,
+		"Region":          config.Region,
+		"GPU":             config.GPU,
+		"Model":           config.Model,
+		"UseSpot":         config.UseSpot,
+		"DiskSize":        config.DiskSize,
+		"VLLMArgs":        config.VLLMArgs,
+		"ControlPlaneURL": o.controlPlaneURL,
+		"VLLMVersion":     o.vllmVersion,
+		"TorchVersion":    o.torchVersion,
+		"Timestamp":       time.Now().Format(time.RFC3339),
 	}
 
 	// Execute template

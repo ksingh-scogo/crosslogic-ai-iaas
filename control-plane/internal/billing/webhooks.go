@@ -6,13 +6,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v76"
 	"github.com/stripe/stripe-go/v76/webhook"
 	"go.uber.org/zap"
+)
+
+const (
+	webhookProcessedTTL  = 24 * time.Hour
+	webhookProcessingTTL = 5 * time.Minute
 )
 
 // WebhookHandler processes Stripe webhook events for payment automation.
@@ -48,9 +55,14 @@ type WebhookHandler struct {
 	// logger provides structured logging for observability and debugging
 	logger *zap.Logger
 
+	// cache provides distributed idempotency tracking
+	cache *cache.Cache
+
 	// processedEvents tracks processed webhook IDs to ensure idempotency.
 	// In production, this should be backed by a distributed cache (Redis) or database table.
 	processedEvents map[string]time.Time
+
+	mu sync.Mutex
 }
 
 // webhookEvent represents a processed webhook event stored in the database
@@ -81,10 +93,11 @@ type webhookEvent struct {
 //	    logger,
 //	)
 //	http.HandleFunc("/api/webhooks/stripe", handler.HandleWebhook)
-func NewWebhookHandler(webhookSecret string, db *database.Database, logger *zap.Logger) *WebhookHandler {
+func NewWebhookHandler(webhookSecret string, db *database.Database, cacheClient *cache.Cache, logger *zap.Logger) *WebhookHandler {
 	return &WebhookHandler{
 		webhookSecret:   webhookSecret,
 		db:              db,
+		cache:           cacheClient,
 		logger:          logger,
 		processedEvents: make(map[string]time.Time),
 	}
@@ -142,15 +155,33 @@ func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: Check for duplicate event (idempotency)
-	if h.isEventProcessed(event.ID) {
-		h.logger.Info("webhook event already processed, skipping",
+	// Step 3: Acquire idempotency lock
+	lockAcquired, err := h.reserveEvent(ctx, event.ID)
+	if err != nil {
+		h.logger.Error("failed to reserve webhook event",
+			zap.Error(err),
+			zap.String("event_id", event.ID),
+		)
+		http.Error(w, "Failed to reserve event", http.StatusInternalServerError)
+		return
+	}
+	if !lockAcquired {
+		h.logger.Info("webhook event already in progress or processed",
 			zap.String("event_id", event.ID),
 			zap.String("event_type", string(event.Type)),
 		)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	var handlerErr error
+
+	defer func() {
+		if handlerErr != nil {
+			h.finalizeEvent(ctx, event.ID, false)
+		} else {
+			h.finalizeEvent(ctx, event.ID, true)
+		}
+	}()
 
 	// Step 4: Log incoming event for observability
 	h.logger.Info("processing webhook event",
@@ -160,7 +191,6 @@ func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Step 5: Route to appropriate handler based on event type
-	var handlerErr error
 	switch event.Type {
 	case "payment_intent.succeeded":
 		handlerErr = h.handlePaymentSucceeded(ctx, event)
@@ -504,28 +534,6 @@ func (h *WebhookHandler) handleInvoicePaymentSucceeded(ctx context.Context, even
 	return nil
 }
 
-// isEventProcessed checks if a webhook event has already been processed.
-//
-// This provides idempotency to prevent duplicate processing of the same event.
-// Stripe may send the same event multiple times if:
-// - The webhook endpoint is slow to respond
-// - The endpoint returns an error (Stripe retries)
-// - Network issues cause duplicate delivery
-//
-// Production implementation should use:
-// - Redis with event IDs as keys (fast, distributed)
-// - PostgreSQL table with unique constraint on event_id
-// - DynamoDB or similar with TTL for automatic cleanup
-//
-// Current in-memory implementation is suitable for:
-// - Development and testing
-// - Single-instance deployments
-// - Low-volume production (with monitoring)
-func (h *WebhookHandler) isEventProcessed(eventID string) bool {
-	_, exists := h.processedEvents[eventID]
-	return exists
-}
-
 // markEventProcessed marks a webhook event as processed and persists to database.
 //
 // This stores the event in both:
@@ -539,9 +547,6 @@ func (h *WebhookHandler) isEventProcessed(eventID string) bool {
 // - Monitor storage growth
 // - Use compressed payload storage for large events
 func (h *WebhookHandler) markEventProcessed(ctx context.Context, event stripe.Event, payload []byte) error {
-	// Mark in memory
-	h.processedEvents[event.ID] = time.Now()
-
 	// Persist to database for audit trail
 	query := `
 		INSERT INTO webhook_events (
@@ -562,6 +567,63 @@ func (h *WebhookHandler) markEventProcessed(ctx context.Context, event stripe.Ev
 	}
 
 	return nil
+}
+
+func (h *WebhookHandler) reserveEvent(ctx context.Context, eventID string) (bool, error) {
+	if h.cache != nil {
+		key := h.redisKeyForEvent(eventID)
+		acquired, err := h.cache.SetNX(ctx, key, "processing", webhookProcessingTTL)
+		return acquired, err
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cleanupExpiredEvents(time.Now())
+	if _, exists := h.processedEvents[eventID]; exists {
+		return false, nil
+	}
+	h.processedEvents[eventID] = time.Now()
+	return true, nil
+}
+
+func (h *WebhookHandler) finalizeEvent(ctx context.Context, eventID string, success bool) {
+	if h.cache != nil {
+		key := h.redisKeyForEvent(eventID)
+		if success {
+			if err := h.cache.Set(ctx, key, "processed", webhookProcessedTTL); err != nil {
+				h.logger.Warn("failed to persist webhook completion in cache",
+					zap.String("event_id", eventID),
+					zap.Error(err),
+				)
+			}
+		} else {
+			if err := h.cache.Delete(ctx, key); err != nil {
+				h.logger.Warn("failed to release webhook lock",
+					zap.String("event_id", eventID),
+					zap.Error(err),
+				)
+			}
+		}
+		return
+	}
+
+	if !success {
+		h.mu.Lock()
+		delete(h.processedEvents, eventID)
+		h.mu.Unlock()
+	}
+}
+
+func (h *WebhookHandler) redisKeyForEvent(eventID string) string {
+	return fmt.Sprintf("webhooks:stripe:%s", eventID)
+}
+
+func (h *WebhookHandler) cleanupExpiredEvents(now time.Time) {
+	for id, ts := range h.processedEvents {
+		if now.Sub(ts) > webhookProcessedTTL {
+			delete(h.processedEvents, id)
+		}
+	}
 }
 
 // mapSubscriptionStatus maps Stripe subscription status to tenant status.

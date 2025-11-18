@@ -55,11 +55,17 @@ func main() {
 	logger.Info("initialized billing engine")
 
 	// Initialize webhook handler
-	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, logger)
+	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger)
 	logger.Info("initialized webhook handler")
 
 	// Initialize SkyPilot orchestrator
-	orch, err := orchestrator.NewSkyPilotOrchestrator(db, logger, cfg.Server.ControlPlaneURL)
+	orch, err := orchestrator.NewSkyPilotOrchestrator(
+		db,
+		logger,
+		cfg.Server.ControlPlaneURL,
+		cfg.Runtime.VLLMVersion,
+		cfg.Runtime.TorchVersion,
+	)
 	if err != nil {
 		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
 	}
@@ -71,7 +77,7 @@ func main() {
 	billingEngine.StartBackgroundJobs(ctx)
 
 	// Initialize API gateway
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch)
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, cfg.Security.AdminAPIToken)
 	logger.Info("initialized API gateway")
 
 	// Create HTTP server

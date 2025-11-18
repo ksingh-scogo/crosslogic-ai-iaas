@@ -12,13 +12,18 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	testVLLMVersion  = "0.6.2"
+	testTorchVersion = "2.4.0"
+)
+
 // TestNewSkyPilotOrchestrator verifies orchestrator initialization
 func TestNewSkyPilotOrchestrator(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.crosslogic.ai"
 
-	orch, err := NewSkyPilotOrchestrator(db, logger, controlPlaneURL)
+	orch, err := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion)
 
 	if err != nil {
 		t.Fatalf("NewSkyPilotOrchestrator failed: %v", err)
@@ -49,7 +54,7 @@ func TestNewSkyPilotOrchestrator(t *testing.T) {
 func TestValidateNodeConfig(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	tests := []struct {
 		name        string
@@ -147,7 +152,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.test.com"
-	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion)
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -191,7 +196,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -224,7 +229,7 @@ func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 func TestLaunchNode_YAMLFileCreation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -333,7 +338,7 @@ func TestNodeConfig_JSONSerialization(t *testing.T) {
 func TestMultiCloudConfigurations(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	providers := []string{"aws", "gcp", "azure", "lambda", "oci"}
 
@@ -369,7 +374,7 @@ func TestMultiCloudConfigurations(t *testing.T) {
 func TestGPUTypes(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	gpuTypes := []string{"A100", "V100", "A10G", "T4", "H100", "L4"}
 
@@ -400,7 +405,7 @@ func TestGPUTypes(t *testing.T) {
 func TestVLLMArgsIncorporation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	customArgs := []string{
 		"--tensor-parallel-size 2",
@@ -436,7 +441,7 @@ func TestVLLMArgsIncorporation(t *testing.T) {
 func TestTaskYAMLStructure(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -489,7 +494,7 @@ func TestTaskYAMLStructure(t *testing.T) {
 func BenchmarkGenerateTaskYAML(b *testing.B) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -514,7 +519,7 @@ func BenchmarkGenerateTaskYAML(b *testing.B) {
 func TestConcurrentYAMLGeneration(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com")
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
 
 	done := make(chan bool, 10)
 	errors := make(chan error, 10)

@@ -3,8 +3,10 @@ package billing
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,7 +88,7 @@ func TestNewWebhookHandler(t *testing.T) {
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	secret := "whsec_test_secret"
 
-	handler := NewWebhookHandler(secret, db, logger)
+	handler := NewWebhookHandler(secret, db, nil, logger)
 
 	if handler == nil {
 		t.Fatal("NewWebhookHandler returned nil")
@@ -113,7 +115,7 @@ func TestNewWebhookHandler(t *testing.T) {
 func TestHandleWebhook_InvalidSignature(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
 
 	// Create request with invalid signature
 	body := []byte(`{"type":"payment_intent.succeeded"}`)
@@ -133,44 +135,107 @@ func TestHandleWebhook_InvalidSignature(t *testing.T) {
 	}
 }
 
-// TestHandleWebhook_DuplicateEvent tests idempotency
+// TestHandleWebhook_DuplicateEvent tests idempotency reservations
 func TestHandleWebhook_DuplicateEvent(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
 
-	// Manually mark event as processed
 	eventID := "evt_test_123"
-	handler.processedEvents[eventID] = time.Now()
+	ctx := context.Background()
 
-	// Create a mock event (signature verification will fail, but we're testing idempotency first)
-	// For this test, we'll need to mock the webhook construction
-	// Since we can't easily create valid Stripe signatures, we'll test the idempotency check directly
+	acquired, err := handler.reserveEvent(ctx, eventID)
+	if err != nil {
+		t.Fatalf("reserveEvent returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected first reservation to succeed")
+	}
 
-	if !handler.isEventProcessed(eventID) {
-		t.Error("Event should be marked as processed")
+	reacquired, err := handler.reserveEvent(ctx, eventID)
+	if err != nil {
+		t.Fatalf("reserveEvent returned error: %v", err)
+	}
+	if reacquired {
+		t.Error("expected duplicate reservation to be rejected")
 	}
 }
 
-// TestIsEventProcessed tests event deduplication
-func TestIsEventProcessed(t *testing.T) {
+// TestReserveEventCleanup ensures expired entries are cleared
+func TestReserveEventCleanup(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
 
 	eventID := "evt_test_456"
+	handler.processedEvents[eventID] = time.Now().Add(-25 * time.Hour)
 
-	// Should not be processed initially
-	if handler.isEventProcessed(eventID) {
-		t.Error("New event should not be marked as processed")
+	acquired, err := handler.reserveEvent(context.Background(), eventID)
+	if err != nil {
+		t.Fatalf("reserveEvent returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected reservation after expiration to succeed")
+	}
+}
+
+func TestConcurrentWebhookProcessing(t *testing.T) {
+	logger := zap.NewNop()
+	db := &database.Database{Pool: &pgxpool.Pool{}}
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
+
+	eventID := "evt_concurrent_test"
+	var acquiredCount int32
+	done := make(chan struct{}, 10)
+
+	for i := 0; i < 10; i++ {
+		go func() {
+			acquired, err := handler.reserveEvent(context.Background(), eventID)
+			if err == nil && acquired {
+				atomic.AddInt32(&acquiredCount, 1)
+			}
+			done <- struct{}{}
+		}()
 	}
 
-	// Mark as processed
-	handler.processedEvents[eventID] = time.Now()
+	for i := 0; i < 10; i++ {
+		<-done
+	}
 
-	// Should now be processed
-	if !handler.isEventProcessed(eventID) {
-		t.Error("Event should be marked as processed")
+	if acquiredCount != 1 {
+		t.Errorf("expected exactly one reservation, got %d", acquiredCount)
+	}
+}
+
+func BenchmarkWebhookHandler(b *testing.B) {
+	logger := zap.NewNop()
+	db := &database.Database{Pool: &pgxpool.Pool{}}
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		handler.reserveEvent(context.Background(), fmt.Sprintf("evt_bench_%d", i))
+	}
+}
+
+func TestEventExpirationCleanup(t *testing.T) {
+	logger := zap.NewNop()
+	db := &database.Database{Pool: &pgxpool.Pool{}}
+	handler := NewWebhookHandler("whsec_test", db, nil, logger)
+
+	oldEventID := "evt_old"
+	recentEventID := "evt_recent"
+
+	handler.processedEvents[oldEventID] = time.Now().Add(-48 * time.Hour)
+	handler.processedEvents[recentEventID] = time.Now()
+
+	handler.cleanupExpiredEvents(time.Now())
+
+	if _, exists := handler.processedEvents[oldEventID]; exists {
+		t.Error("expected old event to be cleaned up")
+	}
+	if _, exists := handler.processedEvents[recentEventID]; !exists {
+		t.Error("expected recent event to remain")
 	}
 }
 
@@ -357,70 +422,3 @@ func TestWebhookEventPersistence(t *testing.T) {
 }
 
 // TestConcurrentWebhookProcessing tests thread safety
-func TestConcurrentWebhookProcessing(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
-
-	// Test concurrent access to processedEvents map
-	eventID := "evt_concurrent_test"
-
-	// Run multiple goroutines
-	done := make(chan bool, 10)
-	for i := 0; i < 10; i++ {
-		go func() {
-			// This should not panic
-			handler.isEventProcessed(eventID)
-			handler.processedEvents[eventID] = time.Now()
-			done <- true
-		}()
-	}
-
-	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-
-	// Should be marked as processed
-	if !handler.isEventProcessed(eventID) {
-		t.Error("Event should be marked as processed")
-	}
-}
-
-// TestWebhookHandlerPerformance benchmarks webhook processing
-func BenchmarkWebhookHandler(b *testing.B) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
-
-	eventID := "evt_bench_test"
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		handler.isEventProcessed(eventID)
-	}
-}
-
-// TestEventExpirationCleanup tests old event cleanup (conceptual)
-func TestEventExpirationCleanup(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, logger)
-
-	// Add old event
-	oldEventID := "evt_old"
-	handler.processedEvents[oldEventID] = time.Now().Add(-48 * time.Hour)
-
-	// Add recent event
-	recentEventID := "evt_recent"
-	handler.processedEvents[recentEventID] = time.Now()
-
-	// In production, implement cleanup logic
-	// For now, just verify both are stored
-	if len(handler.processedEvents) != 2 {
-		t.Errorf("Expected 2 events, got %d", len(handler.processedEvents))
-	}
-
-	// TODO: Implement cleanup function that removes events older than 24 hours
-	// cleanupOldEvents(handler, 24*time.Hour)
-}
