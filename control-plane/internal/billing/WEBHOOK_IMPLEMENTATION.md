@@ -210,10 +210,16 @@ event, err := webhook.ConstructEvent(body, signature, webhookSecret)
 Prevents duplicate event processing:
 
 ```go
-if h.isEventProcessed(event.ID) {
-    // Skip - already processed
+key := fmt.Sprintf("webhooks:stripe:%s", event.ID)
+ok, err := redis.SetNX(ctx, key, "processing", 5*time.Minute).Result()
+if err != nil {
+    // fail safe
+}
+if !ok {
+    // Already processed or in-flight
     return HTTP 200
 }
+defer redis.Set(ctx, key, "processed", 24*time.Hour)
 ```
 
 **Why needed**:
@@ -246,10 +252,11 @@ g.router.Post("/api/webhooks/stripe", g.webhookHandler.HandleWebhook)
 webhookHandler := billing.NewWebhookHandler(
     cfg.Billing.StripeWebhookSecret,
     db,
+    redisCache,
     logger,
 )
 
-gw := gateway.NewGateway(db, redisCache, logger, webhookHandler)
+gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, cfg.Security.AdminAPIToken)
 ```
 
 ## Configuration

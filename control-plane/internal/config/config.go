@@ -14,6 +14,7 @@ type Config struct {
 	Redis      RedisConfig
 	Billing    BillingConfig
 	Security   SecurityConfig
+	Runtime    RuntimeConfig
 	Monitoring MonitoringConfig
 }
 
@@ -64,6 +65,13 @@ type SecurityConfig struct {
 	TLSEnabled       bool
 	TLSCertPath      string
 	TLSKeyPath       string
+	AdminAPIToken    string
+}
+
+// RuntimeConfig holds runtime dependency versions
+type RuntimeConfig struct {
+	VLLMVersion  string
+	TorchVersion string
 }
 
 // MonitoringConfig holds monitoring configuration
@@ -115,6 +123,11 @@ func LoadConfig() (*Config, error) {
 			TLSEnabled:       getEnvAsBool("TLS_ENABLED", false),
 			TLSCertPath:      getEnv("TLS_CERT_PATH", ""),
 			TLSKeyPath:       getEnv("TLS_KEY_PATH", ""),
+			AdminAPIToken:    getEnv("ADMIN_API_TOKEN", ""),
+		},
+		Runtime: RuntimeConfig{
+			VLLMVersion:  getEnv("VLLM_VERSION", "0.6.2"),
+			TorchVersion: getEnv("TORCH_VERSION", "2.4.0"),
 		},
 		Monitoring: MonitoringConfig{
 			Enabled:        getEnvAsBool("MONITORING_ENABLED", true),
@@ -131,6 +144,10 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Billing.StripeSecretKey == "" {
 		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
+	}
+
+	if cfg.Security.AdminAPIToken == "" {
+		return nil, fmt.Errorf("ADMIN_API_TOKEN is required")
 	}
 
 	return cfg, nil

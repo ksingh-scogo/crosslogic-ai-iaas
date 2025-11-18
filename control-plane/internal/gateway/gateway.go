@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const defaultEstimatedTokens = 1024
+
 // Gateway handles API requests
 type Gateway struct {
 	db             *database.Database
@@ -33,10 +36,11 @@ type Gateway struct {
 	vllmProxy      *scheduler.VLLMProxy
 	webhookHandler *billing.WebhookHandler
 	orchestrator   *orchestrator.SkyPilotOrchestrator
+	adminToken     string
 }
 
 // NewGateway creates a new API gateway
-func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator) *Gateway {
+func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, adminToken string) *Gateway {
 	g := &Gateway{
 		db:             db,
 		cache:          cache,
@@ -44,10 +48,11 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 		authenticator:  NewAuthenticator(db, cache, logger),
 		rateLimiter:    NewRateLimiter(cache, logger),
 		router:         chi.NewRouter(),
-		scheduler:      scheduler.NewScheduler(db, logger),
+		scheduler:      scheduler.NewScheduler(db, cache, logger),
 		vllmProxy:      scheduler.NewVLLMProxy(logger),
 		webhookHandler: webhookHandler,
 		orchestrator:   orch,
+		adminToken:     adminToken,
 	}
 
 	g.setupRoutes()
@@ -181,20 +186,45 @@ func (g *Gateway) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		defer func(keyID string) {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := g.rateLimiter.DecrementConcurrency(releaseCtx, keyID); err != nil {
+				g.logger.Debug("failed to decrement concurrency",
+					zap.String("key_id", keyID),
+					zap.Error(err),
+				)
+			}
+		}(keyInfo.ID.String())
+
 		next.ServeHTTP(w, r)
 	})
 }
 
 func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// For now, simple token-based auth
-		// In production, use proper admin authentication
 		adminToken := r.Header.Get("X-Admin-Token")
-		// TODO: Validate admin token
 		if adminToken == "" {
 			g.writeError(w, http.StatusUnauthorized, "missing admin token")
 			return
 		}
+
+		// Constant-time comparison to prevent timing attacks
+		if subtle.ConstantTimeCompare([]byte(adminToken), []byte(g.adminToken)) != 1 {
+			g.logger.Warn("invalid admin token attempt",
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("path", r.URL.Path),
+			)
+			g.writeError(w, http.StatusUnauthorized, "invalid admin token")
+			return
+		}
+
+		// Audit log for admin actions
+		g.logger.Info("admin action authenticated",
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+		)
 
 		next.ServeHTTP(w, r)
 	})
@@ -308,19 +338,37 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Record request start for billing
 	requestID := uuid.New()
 	startTime := time.Now()
+	estimatedTokens := estimateTokens(req.MaxTokens)
+	g.scheduler.TrackRequestStart(node.ID, estimatedTokens)
+	defer g.scheduler.TrackRequestEnd(node.ID, estimatedTokens)
 
 	// Forward request to vLLM node
 	if req.Stream {
 		// Handle streaming response
-		err = g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
+		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
 		if err != nil {
 			g.logger.Error("streaming failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
 			)
-			// Headers are already written in streaming mode, can't send error response
-			// The error has been logged, connection will be closed
 			return
+		}
+
+		if streamUsage != nil {
+			requestIDStr := requestID.String()
+			g.recordUsage(ctx, models.UsageRecord{
+				ID:               requestID,
+				RequestID:        &requestIDStr,
+				Timestamp:        startTime,
+				TenantID:         tenantID,
+				EnvironmentID:    envID,
+				APIKeyID:         &keyInfo.ID,
+				NodeID:           &node.ID,
+				PromptTokens:     streamUsage.PromptTokens,
+				CompletionTokens: streamUsage.CompletionTokens,
+				TotalTokens:      streamUsage.TotalTokens,
+				LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
+			})
 		}
 	} else {
 		// Handle non-streaming response
@@ -471,17 +519,38 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// Record request start
 	requestID := uuid.New()
 	startTime := time.Now()
+	g.scheduler.TrackRequestStart(node.ID, defaultEstimatedTokens)
+	defer g.scheduler.TrackRequestEnd(node.ID, defaultEstimatedTokens)
+	estimatedTokens := estimateTokens(req.MaxTokens)
+	g.scheduler.TrackRequestStart(node.ID, estimatedTokens)
+	defer g.scheduler.TrackRequestEnd(node.ID, estimatedTokens)
 
 	// Forward request to vLLM node
 	if req.Stream {
-		// Handle streaming response
-		err = g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
+		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
 		if err != nil {
 			g.logger.Error("streaming failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
 			)
 			return
+		}
+
+		if streamUsage != nil {
+			requestIDStr := requestID.String()
+			g.recordUsage(ctx, models.UsageRecord{
+				ID:               requestID,
+				RequestID:        &requestIDStr,
+				Timestamp:        startTime,
+				TenantID:         tenantID,
+				EnvironmentID:    envID,
+				APIKeyID:         &keyInfo.ID,
+				NodeID:           &node.ID,
+				PromptTokens:     streamUsage.PromptTokens,
+				CompletionTokens: streamUsage.CompletionTokens,
+				TotalTokens:      streamUsage.TotalTokens,
+				LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
+			})
 		}
 	} else {
 		// Handle non-streaming response
@@ -945,6 +1014,16 @@ func getFloat64(v interface{}) float64 {
 // intPtr returns a pointer to an int
 func intPtr(i int) *int {
 	return &i
+}
+
+func estimateTokens(maxTokens *int) int {
+	if maxTokens == nil {
+		return defaultEstimatedTokens
+	}
+	if *maxTokens <= 0 {
+		return defaultEstimatedTokens
+	}
+	return *maxTokens
 }
 
 // Request/Response types

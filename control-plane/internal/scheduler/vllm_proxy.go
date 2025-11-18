@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -41,6 +42,13 @@ type ProxyMetrics struct {
 	StreamingFailed int64
 	TotalLatencyMs  int64
 	mu              sync.RWMutex
+}
+
+// UsageMetrics captures token usage emitted by vLLM streams
+type UsageMetrics struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
 }
 
 // CircuitBreaker implements circuit breaker pattern for node failures
@@ -198,6 +206,7 @@ func (p *VLLMProxy) ForwardRequest(ctx context.Context, node *models.Node, origi
 //   - body: Request body bytes
 //
 // Returns:
+//   - *UsageMetrics: token usage emitted at stream completion (if provided)
 //   - error: Any error that occurred during streaming
 //
 // Example usage:
@@ -206,7 +215,7 @@ func (p *VLLMProxy) ForwardRequest(ctx context.Context, node *models.Node, origi
 //	if err != nil {
 //	    http.Error(w, "Streaming failed", 500)
 //	}
-func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, originalReq *http.Request, w http.ResponseWriter, body []byte) error {
+func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, originalReq *http.Request, w http.ResponseWriter, body []byte) (*UsageMetrics, error) {
 	startTime := time.Now()
 
 	p.logger.Debug("starting streaming proxy",
@@ -218,7 +227,7 @@ func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, orig
 	resp, err := p.ForwardRequest(ctx, node, originalReq, body)
 	if err != nil {
 		p.metrics.recordStreamingFailure()
-		return fmt.Errorf("failed to initiate streaming: %w", err)
+		return nil, fmt.Errorf("failed to initiate streaming: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -252,11 +261,11 @@ func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, orig
 	// Get flusher for real-time streaming
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return fmt.Errorf("response writer does not support flushing")
+		return nil, fmt.Errorf("response writer does not support flushing")
 	}
 
 	// Stream the response with proper chunking
-	err = p.streamResponse(ctx, resp.Body, w, flusher)
+	usage, err := p.streamResponse(ctx, resp.Body, w, flusher)
 	if err != nil {
 		p.metrics.recordStreamingFailure()
 		p.logger.Error("streaming failed",
@@ -264,7 +273,7 @@ func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, orig
 			zap.Error(err),
 			zap.Duration("duration", time.Since(startTime)),
 		)
-		return err
+		return nil, err
 	}
 
 	p.metrics.recordStreamingSuccess()
@@ -273,23 +282,25 @@ func (p *VLLMProxy) HandleStreaming(ctx context.Context, node *models.Node, orig
 		zap.Duration("duration", time.Since(startTime)),
 	)
 
-	return nil
+	return usage, nil
 }
 
 // streamResponse handles the actual streaming of data from source to destination
 // It uses a 4KB buffer for efficient chunked transfer
-func (p *VLLMProxy) streamResponse(ctx context.Context, source io.Reader, dest io.Writer, flusher http.Flusher) error {
+func (p *VLLMProxy) streamResponse(ctx context.Context, source io.Reader, dest io.Writer, flusher http.Flusher) (*UsageMetrics, error) {
 	// Use a 4KB buffer for chunked streaming (optimal for SSE)
 	buffer := make([]byte, 4096)
 
 	// Create a reader for better error handling
 	reader := bufio.NewReaderSize(source, 4096)
+	parser := newSSEUsageParser()
+	var lastUsage *UsageMetrics
 
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		default:
 		}
 
@@ -299,29 +310,141 @@ func (p *VLLMProxy) streamResponse(ctx context.Context, source io.Reader, dest i
 			// Write chunk to destination
 			written, writeErr := dest.Write(buffer[:n])
 			if writeErr != nil {
-				return fmt.Errorf("failed to write chunk: %w", writeErr)
+				return nil, fmt.Errorf("failed to write chunk: %w", writeErr)
 			}
 			if written != n {
-				return fmt.Errorf("partial write: wrote %d of %d bytes", written, n)
+				return nil, fmt.Errorf("partial write: wrote %d of %d bytes", written, n)
 			}
 
 			// Flush immediately for real-time streaming
 			flusher.Flush()
+
+			if usages := parser.Append(buffer[:n]); len(usages) > 0 {
+				lastUsage = usages[len(usages)-1]
+			}
 		}
 
 		// Handle read errors
 		if err == io.EOF {
 			// Normal completion
-			return nil
+			return lastUsage, nil
 		}
 		if err != nil {
 			// Check if it's a timeout or context cancellation
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
-			return fmt.Errorf("failed to read chunk: %w", err)
+			return nil, fmt.Errorf("failed to read chunk: %w", err)
 		}
 	}
+}
+
+// sseUsageParser extracts usage information emitted in SSE data payloads
+type sseUsageParser struct {
+	buffer []byte
+}
+
+func newSSEUsageParser() *sseUsageParser {
+	return &sseUsageParser{
+		buffer: make([]byte, 0, 4096),
+	}
+}
+
+func (p *sseUsageParser) Append(chunk []byte) []*UsageMetrics {
+	p.buffer = append(p.buffer, chunk...)
+	var metrics []*UsageMetrics
+
+	for {
+		idx, delimiterLen := findSSEDelimiter(p.buffer)
+		if idx == -1 {
+			break
+		}
+
+		event := make([]byte, idx)
+		copy(event, p.buffer[:idx])
+		p.buffer = p.buffer[idx+delimiterLen:]
+
+		if usage := extractUsageMetrics(event); usage != nil {
+			metrics = append(metrics, usage)
+		}
+	}
+
+	return metrics
+}
+
+func findSSEDelimiter(buffer []byte) (int, int) {
+	if idx := bytes.Index(buffer, []byte("\r\n\r\n")); idx != -1 {
+		return idx, 4
+	}
+	if idx := bytes.Index(buffer, []byte("\n\n")); idx != -1 {
+		return idx, 2
+	}
+	return -1, 0
+}
+
+func extractUsageMetrics(event []byte) *UsageMetrics {
+	lines := bytes.Split(event, []byte("\n"))
+	var dataParts []string
+
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == ':' {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			dataParts = append(dataParts, strings.TrimSpace(string(line[5:])))
+		}
+	}
+
+	if len(dataParts) == 0 {
+		return nil
+	}
+
+	payload := strings.TrimSpace(strings.Join(dataParts, "\n"))
+	if payload == "" || payload == "[DONE]" {
+		return nil
+	}
+
+	usage, err := parseUsagePayload(payload)
+	if err != nil {
+		return nil
+	}
+	return usage
+}
+
+func parseUsagePayload(payload string) (*UsageMetrics, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+		return nil, err
+	}
+
+	rawUsage, ok := envelope["usage"]
+	if !ok || len(rawUsage) == 0 {
+		return nil, nil
+	}
+
+	var parsed struct {
+		PromptTokens     *int `json:"prompt_tokens"`
+		CompletionTokens *int `json:"completion_tokens"`
+		TotalTokens      *int `json:"total_tokens"`
+	}
+
+	if err := json.Unmarshal(rawUsage, &parsed); err != nil {
+		return nil, err
+	}
+
+	return &UsageMetrics{
+		PromptTokens:     derefInt(parsed.PromptTokens),
+		CompletionTokens: derefInt(parsed.CompletionTokens),
+		TotalTokens:      derefInt(parsed.TotalTokens),
+	}, nil
+}
+
+func derefInt(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 // executeWithRetry performs the HTTP request with exponential backoff retry logic
@@ -466,20 +589,15 @@ func (p *VLLMProxy) isNodeHealthy(endpoint string) bool {
 		return true
 	}
 
-	breaker.mu.RLock()
-	defer breaker.mu.RUnlock()
+	breaker.mu.Lock()
+	defer breaker.mu.Unlock()
 
 	// Check circuit breaker state
 	switch breaker.state {
 	case "open":
 		// Check if enough time has passed to try again
 		if time.Since(breaker.lastFailTime) > 30*time.Second {
-			// Move to half-open state
-			breaker.mu.RUnlock()
-			breaker.mu.Lock()
 			breaker.state = "half-open"
-			breaker.mu.Unlock()
-			breaker.mu.RLock()
 			return true
 		}
 		return false
