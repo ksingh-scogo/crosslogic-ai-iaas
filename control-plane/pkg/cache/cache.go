@@ -2,7 +2,9 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/crosslogic/control-plane/internal/config"
@@ -55,9 +57,32 @@ func (c *Cache) Set(ctx context.Context, key string, value interface{}, expirati
 	return c.Client.Set(ctx, key, value, expiration).Err()
 }
 
+// SetNX sets a key only if it does not already exist
+func (c *Cache) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+	return c.Client.SetNX(ctx, key, value, expiration).Result()
+}
+
 // Get retrieves a value by key
 func (c *Cache) Get(ctx context.Context, key string) (string, error) {
 	return c.Client.Get(ctx, key).Result()
+}
+
+// GetInt64 retrieves a key as int64, returning a bool indicating if the key existed
+func (c *Cache) GetInt64(ctx context.Context, key string) (int64, bool, error) {
+	value, err := c.Client.Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+
+	parsed, convErr := strconv.ParseInt(value, 10, 64)
+	if convErr != nil {
+		return 0, true, convErr
+	}
+
+	return parsed, true, nil
 }
 
 // Delete deletes a key

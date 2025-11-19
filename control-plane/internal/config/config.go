@@ -14,16 +14,18 @@ type Config struct {
 	Redis      RedisConfig
 	Billing    BillingConfig
 	Security   SecurityConfig
+	Runtime    RuntimeConfig
 	Monitoring MonitoringConfig
 }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	Host         string
-	Port         int
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
+	Host            string
+	Port            int
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	IdleTimeout     time.Duration
+	ControlPlaneURL string // Public HTTPS URL for node agent registration
 }
 
 // DatabaseConfig holds database configuration
@@ -50,10 +52,10 @@ type RedisConfig struct {
 
 // BillingConfig holds billing configuration
 type BillingConfig struct {
-	StripeSecretKey      string
-	StripeWebhookSecret  string
-	AggregationInterval  time.Duration
-	ExportInterval       time.Duration
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	AggregationInterval time.Duration
+	ExportInterval      time.Duration
 }
 
 // SecurityConfig holds security configuration
@@ -63,25 +65,33 @@ type SecurityConfig struct {
 	TLSEnabled       bool
 	TLSCertPath      string
 	TLSKeyPath       string
+	AdminAPIToken    string
+}
+
+// RuntimeConfig holds runtime dependency versions
+type RuntimeConfig struct {
+	VLLMVersion  string
+	TorchVersion string
 }
 
 // MonitoringConfig holds monitoring configuration
 type MonitoringConfig struct {
-	Enabled           bool
-	PrometheusPort    int
-	MetricsPath       string
-	LogLevel          string
+	Enabled        bool
+	PrometheusPort int
+	MetricsPath    string
+	LogLevel       string
 }
 
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
 		Server: ServerConfig{
-			Host:         getEnv("SERVER_HOST", "0.0.0.0"),
-			Port:         getEnvAsInt("SERVER_PORT", 8080),
-			ReadTimeout:  getEnvAsDuration("SERVER_READ_TIMEOUT", "30s"),
-			WriteTimeout: getEnvAsDuration("SERVER_WRITE_TIMEOUT", "30s"),
-			IdleTimeout:  getEnvAsDuration("SERVER_IDLE_TIMEOUT", "120s"),
+			Host:            getEnv("SERVER_HOST", "0.0.0.0"),
+			Port:            getEnvAsInt("SERVER_PORT", 8080),
+			ReadTimeout:     getEnvAsDuration("SERVER_READ_TIMEOUT", "30s"),
+			WriteTimeout:    getEnvAsDuration("SERVER_WRITE_TIMEOUT", "30s"),
+			IdleTimeout:     getEnvAsDuration("SERVER_IDLE_TIMEOUT", "120s"),
+			ControlPlaneURL: getEnv("CONTROL_PLANE_URL", "https://api.crosslogic.ai"),
 		},
 		Database: DatabaseConfig{
 			Host:            getEnv("DB_HOST", "localhost"),
@@ -102,10 +112,10 @@ func LoadConfig() (*Config, error) {
 			PoolSize: getEnvAsInt("REDIS_POOL_SIZE", 10),
 		},
 		Billing: BillingConfig{
-			StripeSecretKey:      getEnv("STRIPE_SECRET_KEY", ""),
-			StripeWebhookSecret:  getEnv("STRIPE_WEBHOOK_SECRET", ""),
-			AggregationInterval:  getEnvAsDuration("BILLING_AGGREGATION_INTERVAL", "1h"),
-			ExportInterval:       getEnvAsDuration("BILLING_EXPORT_INTERVAL", "5m"),
+			StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),
+			StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
+			AggregationInterval: getEnvAsDuration("BILLING_AGGREGATION_INTERVAL", "1h"),
+			ExportInterval:      getEnvAsDuration("BILLING_EXPORT_INTERVAL", "5m"),
 		},
 		Security: SecurityConfig{
 			APIKeyHashRounds: getEnvAsInt("API_KEY_HASH_ROUNDS", 12),
@@ -113,6 +123,11 @@ func LoadConfig() (*Config, error) {
 			TLSEnabled:       getEnvAsBool("TLS_ENABLED", false),
 			TLSCertPath:      getEnv("TLS_CERT_PATH", ""),
 			TLSKeyPath:       getEnv("TLS_KEY_PATH", ""),
+			AdminAPIToken:    getEnv("ADMIN_API_TOKEN", ""),
+		},
+		Runtime: RuntimeConfig{
+			VLLMVersion:  getEnv("VLLM_VERSION", "0.6.2"),
+			TorchVersion: getEnv("TORCH_VERSION", "2.4.0"),
 		},
 		Monitoring: MonitoringConfig{
 			Enabled:        getEnvAsBool("MONITORING_ENABLED", true),
@@ -129,6 +144,10 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Billing.StripeSecretKey == "" {
 		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
+	}
+
+	if cfg.Security.AdminAPIToken == "" {
+		return nil, fmt.Errorf("ADMIN_API_TOKEN is required")
 	}
 
 	return cfg, nil

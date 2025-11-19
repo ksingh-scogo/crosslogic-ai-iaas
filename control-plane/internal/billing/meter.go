@@ -3,7 +3,6 @@ package billing
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/crosslogic/control-plane/pkg/database"
 	"go.uber.org/zap"

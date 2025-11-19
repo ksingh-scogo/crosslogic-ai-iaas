@@ -112,11 +112,10 @@ Storage Layer:
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- PostgreSQL 16+
-- Redis 7+
-- Go 1.22+ (for development)
-- Stripe account (for billing)
+- Docker **24+** & Docker Compose **v2**
+- Stripe account (test mode is fine)
+- Hugging Face account/token (to pull open models)
+- GPU access (local CUDA host or any SkyPilot-supported cloud)
 
 ### 1. Clone Repository
 
@@ -130,78 +129,176 @@ cd crosslogic-ai-iaas
 ```bash
 cp config/.env.example .env
 
-# Edit .env with your settings
-nano .env
+# Required minimum (edit .env)
+DB_PASSWORD=supersecure
+STRIPE_SECRET_KEY=sk_test_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+ADMIN_API_TOKEN=cl_admin_$(openssl rand -hex 16)
+VLLM_VERSION=0.6.2
+TORCH_VERSION=2.4.0
 
-# Required settings:
-# - DB_PASSWORD: Strong database password
-# - STRIPE_SECRET_KEY: Your Stripe secret key
-# - STRIPE_WEBHOOK_SECRET: Your Stripe webhook secret
+# Optional: dashboard + auth
+CROSSLOGIC_API_BASE_URL=http://localhost:8080
+CROSSLOGIC_ADMIN_TOKEN=$ADMIN_API_TOKEN
+CROSSLOGIC_DASHBOARD_TENANT_ID=<tenant-uuid-after-seeding>
 ```
 
-### 3. Start Services
+### 3. Build & Start Services (Docker end-to-end)
 
 ```bash
-# Start all services
-docker-compose up -d
+# Build Go services
+docker build -f Dockerfile.control-plane -t crosslogic/control-plane:dev .
+docker build -f Dockerfile.node-agent -t crosslogic/node-agent:dev .
 
-# Check status
-docker-compose ps
+# Start infra + control plane
+docker compose up -d postgres redis
+docker compose run --rm postgres \
+  psql -U crosslogic -d crosslogic_iaas \
+  -f /docker-entrypoint-initdb.d/01_core_tables.sql
 
-# View logs
-docker-compose logs -f control-plane
+docker compose up -d control-plane
+
+# Dashboard (Next.js) is optional but recommended
+pushd control-plane/dashboard
+npm install
+npm run dev # or npm run build && npm start for prod
+popd
 ```
 
-### 4. Initialize Database
+> **First execution tip:** wait for `control-plane` logs to show `server exited` messages? Use `docker compose logs -f control-plane` and confirm DB/cache health checks succeed.
+
+### 4. Seed Tenant, Environment & API Key
 
 ```bash
-# Run migrations
-docker-compose exec postgres psql -U crosslogic -d crosslogic_iaas -f /docker-entrypoint-initdb.d/01_core_tables.sql
+docker compose exec postgres psql -U crosslogic crosslogic_iaas <<'SQL'
+INSERT INTO tenants (id, name, email, status, billing_plan)
+VALUES (gen_random_uuid(), 'Demo Org', 'demo@example.com', 'active', 'serverless')
+RETURNING id\gset
 
-# Verify tables
-docker-compose exec postgres psql -U crosslogic -d crosslogic_iaas -c "\dt"
+INSERT INTO environments (id, tenant_id, name, region, status)
+VALUES (gen_random_uuid(), :'id', 'production', 'us-east', 'active')
+RETURNING id\gset
+
+-- Minimal llama-3-8b model seed
+INSERT INTO models (id, name, family, type, context_length, vram_required_gb, price_input_per_million, price_output_per_million)
+VALUES (gen_random_uuid(), 'llama-3-8b', 'Llama', 'chat', 8192, 16, 0.05, 0.05);
+SQL
+
+# Create API key via admin endpoint
+curl -X POST http://localhost:8080/admin/api-keys \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"<TENANT_UUID>","environment_id":"<ENV_UUID>","name":"prod-key"}'
 ```
 
-### 5. Create First Tenant & API Key
+### 5. Smoke Test the OpenAI-compatible API
 
 ```bash
-# Connect to PostgreSQL
-docker-compose exec postgres psql -U crosslogic crosslogic_iaas
-
-# Create tenant
-INSERT INTO tenants (name, email, status, billing_plan)
-VALUES ('Demo Org', 'demo@example.com', 'active', 'serverless')
-RETURNING id;
-
-# Create environment
-INSERT INTO environments (tenant_id, name, region, status)
-VALUES ('<tenant_id>', 'production', 'in-mumbai', 'active')
-RETURNING id;
-
-# Generate API key (use control plane API or manual hash)
-# Key format: clsk_live_{random_32_chars}
-```
-
-### 6. Test API
-
-```bash
-export API_KEY="clsk_live_your_generated_key_here"
-
-# List models
-curl -X GET http://localhost:8080/v1/models \
-  -H "Authorization: Bearer $API_KEY"
-
-# Chat completion
+export API_KEY="clsk_live_..."   # value returned above
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama-3-8b",
-    "messages": [
-      {"role": "user", "content": "Hello!"}
-    ]
+    "messages": [{"role":"user","content":"Hello CrossLogic!"}],
+    "max_tokens": 64
   }'
 ```
+
+If you receive `no available nodes`, proceed to the [launch your first GPU node](#launch-a-1-billion-parameter-llm) section.
+
+### 6. Dashboard Login (Optional)
+
+1. Export `CROSSLOGIC_API_BASE_URL` & `CROSSLOGIC_ADMIN_TOKEN` in `.env.local`.
+2. `npm run dev` inside `control-plane/dashboard`.
+3. Visit `http://localhost:3000` → sign in via Google or email (NextAuth magic link).
+
+All cards use the admin API (`/admin/nodes`, `/admin/api-keys`, `/admin/usage/{tenant_id}`) and fall back to mock data if the control plane is unreachable.
+
+---
+
+## 🐳 Full Docker + Services Runbook
+
+| Component            | Command                                                  |
+|----------------------|----------------------------------------------------------|
+| PostgreSQL + Redis   | `docker compose up -d postgres redis`                    |
+| Control Plane API    | `docker compose up -d control-plane`                     |
+| Node Agent (GPU)     | `docker run --gpus all crosslogic/node-agent:dev ...`    |
+| Dashboard (Next.js)  | `npm run dev` inside `control-plane/dashboard/`          |
+| Background billing   | auto-starts inside control-plane container               |
+| Stripe webhooks      | expose `http://localhost:8080/api/webhooks/stripe` via ngrok/Cloudflare and set the signing secret in `.env`. |
+
+To stop everything: `docker compose down` (append `-v` to wipe volumes).
+
+---
+
+## 🚀 Launch a 1 Billion Parameter LLM
+
+The stack ships with popular models, but you can bring any Hugging Face checkpoint. Below is a tested recipe for **TinyLlama/TinyLlama-1.1B-Chat-v1.0** (~1B parameters).
+
+### 1. Register the Model
+
+```sql
+INSERT INTO models (
+    id, name, family, size, type, context_length,
+    vram_required_gb, price_input_per_million, price_output_per_million, status
+) VALUES (
+    gen_random_uuid(),
+    'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+    'TinyLlama',
+    '1.1B',
+    'chat',
+    4096,
+    8,
+    0.02,
+    0.02,
+    'active'
+);
+```
+
+### 2. Start a GPU Worker (local or cloud)
+
+```bash
+docker run --gpus all --rm \
+  -e CONTROL_PLANE_URL=http://host.docker.internal:8080 \
+  -e NODE_ID=$(uuidgen) \
+  -e MODEL_NAME="TinyLlama/TinyLlama-1.1B-Chat-v1.0" \
+  -e REGION=us-east \
+  -e PROVIDER=local \
+  -e VLLM_ENDPOINT=http://localhost:8000 \
+  -e HF_TOKEN=$HUGGINGFACE_TOKEN \
+  crosslogic/node-agent:dev
+```
+
+> Alternatively, use SkyPilot to launch an A10G instance. The orchestrator now pins `vLLM`/`torch` versions via `VLLM_VERSION` and `TORCH_VERSION` env vars.
+
+### 3. Update Scheduler Node Pool
+
+The node agent registers itself automatically. Verify:
+
+```bash
+curl -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  http://localhost:8080/admin/nodes | jq
+```
+
+You should see your TinyLlama node in `active` status with a healthy score.
+
+### 4. Run Inference
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [{"role":"user","content":"Summarize CrossLogic in 2 sentences."}],
+    "max_tokens": 128
+  }'
+```
+
+Streaming responses are fully metered: the control plane now parses SSE usage events emitted by vLLM and writes them to `usage_records`, ensuring billing works for both streaming and non-streaming calls.
+
+---
 
 ## 📦 Deployment
 
@@ -486,6 +583,30 @@ Comprehensive documentation is available in the `docs/` directory:
 - [Deployment Guide](docs/deployment/deployment-guide.md)
 - [Monitoring & Observability](docs/monitoring.md)
 - [Security Best Practices](docs/security.md)
+
+## 🧪 Testing
+
+### Local Testing
+
+To run tests locally, ensure you have Go installed and the database running:
+
+```bash
+# Start dependencies
+docker-compose up -d postgres redis
+
+# Run tests
+cd control-plane
+go test ./...
+```
+
+### Docker Testing
+
+To run tests in a consistent Docker environment:
+
+```bash
+./tests/docker-test-runner.sh
+```
+
 
 ## 🛠️ Development
 
