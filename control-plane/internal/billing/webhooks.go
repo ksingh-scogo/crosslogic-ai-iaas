@@ -260,6 +260,13 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 		return fmt.Errorf("payment intent missing customer ID")
 	}
 
+	// Start transaction
+	tx, err := h.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Update tenant status to active
 	query := `
 		UPDATE tenants
@@ -270,9 +277,14 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 
 	var tenantID uuid.UUID
 	var tenantName string
-	err := h.db.Pool.QueryRow(ctx, query, customerID).Scan(&tenantID, &tenantName)
+	err = tx.QueryRow(ctx, query, customerID).Scan(&tenantID, &tenantName)
 	if err != nil {
 		return fmt.Errorf("failed to update tenant status: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	h.logger.Info("payment succeeded - tenant activated",
@@ -329,6 +341,13 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 		failureMessage = paymentIntent.LastPaymentError.Msg
 	}
 
+	// Start transaction
+	tx, err := h.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Suspend tenant account
 	query := `
 		UPDATE tenants
@@ -339,9 +358,14 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 
 	var tenantID uuid.UUID
 	var tenantName, tenantEmail string
-	err := h.db.Pool.QueryRow(ctx, query, customerID).Scan(&tenantID, &tenantName, &tenantEmail)
+	err = tx.QueryRow(ctx, query, customerID).Scan(&tenantID, &tenantName, &tenantEmail)
 	if err != nil {
 		return fmt.Errorf("failed to suspend tenant: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	h.logger.Warn("payment failed - tenant suspended",
@@ -413,6 +437,13 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 	// Map subscription status to tenant status
 	tenantStatus := mapSubscriptionStatus(subscription.Status)
 
+	// Start transaction
+	tx, err := h.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Update tenant billing plan and status
 	query := `
 		UPDATE tenants
@@ -423,9 +454,14 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 
 	var tenantID uuid.UUID
 	var tenantName string
-	err := h.db.Pool.QueryRow(ctx, query, priceID, tenantStatus, customerID).Scan(&tenantID, &tenantName)
+	err = tx.QueryRow(ctx, query, priceID, tenantStatus, customerID).Scan(&tenantID, &tenantName)
 	if err != nil {
 		return fmt.Errorf("failed to update tenant subscription: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	h.logger.Info("subscription updated",

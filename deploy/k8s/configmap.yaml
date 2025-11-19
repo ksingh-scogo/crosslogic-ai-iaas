@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cic-config
+data:
+  SERVER_HOST: "0.0.0.0"
+  SERVER_PORT: "8080"
+  LOG_LEVEL: "info"
+  ENVIRONMENT: "production"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "crosslogic_iaas"
+  DB_USER: "crosslogic"
+  DB_SSLMODE: "disable"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  CONTROL_PLANE_URL: "http://control-plane"
+

@@ -1,23 +1,70 @@
-type UsagePoint = {
-  timestamp: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalCost: string;
+import { format } from "date-fns";
+
+type UsageHourly = {
+  id: string;
+  hour: string;
+  tenant_id: string;
+  total_tokens: number;
+  total_requests: number;
+  total_cost_microdollars: number;
+};
+
+type Node = {
+  id: string;
+  provider: string;
+  status: string;
+  endpoint_url: string;
+  health_score: number;
+  last_heartbeat_at: string;
+  cluster_name?: string;
 };
 
 type ApiKey = {
   id: string;
   name: string;
   prefix: string;
-  createdAt: string;
+  created_at: string;
+  last_used_at?: string;
   status: "active" | "revoked" | "suspended";
+  rate_limit?: number;
+};
+
+type CreateApiKeyResponse = {
+  id: string;
+  key: string;
+};
+
+type LaunchNodeRequest = {
+  provider: string;
+  region: string;
+  gpu: string;
+  model: string;
+  use_spot: boolean;
+};
+
+type LaunchNodeResponse = {
+  cluster_name: string;
+  node_id: string;
+  status: string;
+};
+
+// UI-friendly types
+type UsagePoint = {
+  timestamp: string;
+  promptTokens: number; // Not available in hourly agg yet, using total
+  completionTokens: number; // Not available in hourly agg yet, using 0
+  totalTokens: number;
+  totalCost: string;
 };
 
 type NodeSummary = {
   id: string;
   status: string;
-  model: string;
-  region: string;
+  provider: string;
+  endpoint: string;
+  health: number;
+  lastHeartbeat: string;
+  clusterName?: string;
 };
 
 const baseUrl =
@@ -36,7 +83,7 @@ async function adminFetch<T>(
   init?: RequestInit
 ): Promise<T> {
   if (!adminToken) {
-    throw new Error("ADMIN_API_TOKEN missing");
+    console.warn("ADMIN_API_TOKEN missing");
   }
 
   const response = await fetch(`${baseUrl}${path}`, {
@@ -50,7 +97,7 @@ async function adminFetch<T>(
   });
 
   if (!response.ok) {
-    throw new Error(`Admin API failed: ${response.status}`);
+    throw new Error(`Admin API failed: ${response.status} ${response.statusText}`);
   }
 
   return response.json();
@@ -60,72 +107,102 @@ export async function fetchUsageHistory(
   tenantId: string
 ): Promise<UsagePoint[]> {
   try {
-    const data = await adminFetch<{ usage: UsagePoint[] }>(
+    const data = await adminFetch<UsageHourly[]>(
       `/admin/usage/${tenantId}`
     );
-    return data.usage;
+    
+    return data.map((item) => ({
+      timestamp: item.hour,
+      promptTokens: 0, // TODO: Add split to backend
+      completionTokens: 0, // TODO: Add split to backend
+      totalTokens: item.total_tokens,
+      totalCost: `$${(item.total_cost_microdollars / 1_000_000).toFixed(4)}`
+    }));
   } catch (err) {
     console.warn("Falling back to mock usage data", err);
     const now = new Date();
-    return Array.from({ length: 5 }).map((_, idx) => {
+    return Array.from({ length: 24 }).map((_, idx) => {
       const ts = new Date(now.getTime() - idx * 3600 * 1000);
       return {
         timestamp: ts.toISOString(),
-        promptTokens: 2000 + idx * 150,
-        completionTokens: 1200 + idx * 90,
-        totalCost: `$${(0.34 + idx * 0.02).toFixed(2)}`
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 1000 + idx * 100,
+        totalCost: `$${(0.01 + idx * 0.001).toFixed(4)}`
       };
     });
   }
 }
 
-export async function fetchApiKeys(): Promise<ApiKey[]> {
+export async function fetchApiKeys(tenantId: string): Promise<ApiKey[]> {
   try {
-    const data = await adminFetch<{ keys: ApiKey[] }>("/admin/api-keys");
-    return data.keys;
+    return await adminFetch<ApiKey[]>(`/admin/api-keys/${tenantId}`);
   } catch (err) {
-    console.warn("Using mock API key data", err);
+    console.warn("Falling back to mock API keys", err);
     return [
       {
         id: "mock-1",
-        name: "Production backend",
-        prefix: "clsk_live_abcd",
-        createdAt: new Date().toISOString(),
+        name: "Production backend (Mock)",
+        prefix: "sk-...abcd",
+        created_at: new Date().toISOString(),
         status: "active"
-      },
-      {
-        id: "mock-2",
-        name: "Data science team",
-        prefix: "clsk_live_efgh",
-        createdAt: new Date(Date.now() - 86400000).toISOString(),
-        status: "revoked"
       }
     ];
   }
 }
 
+export async function createApiKey(tenantId: string, name: string): Promise<CreateApiKeyResponse> {
+  return await adminFetch<CreateApiKeyResponse>("/admin/api-keys", {
+    method: "POST",
+    body: JSON.stringify({ tenant_id: tenantId, name })
+  });
+}
+
+export async function revokeApiKey(keyId: string): Promise<void> {
+  await adminFetch(`/admin/api-keys/${keyId}`, {
+    method: "DELETE"
+  });
+}
+
 export async function fetchNodeSummaries(): Promise<NodeSummary[]> {
   try {
-    const data = await adminFetch<{ nodes: NodeSummary[] }>("/admin/nodes");
-    return data.nodes;
+    const nodes = await adminFetch<Node[]>("/admin/nodes");
+    return nodes.map((node) => ({
+      id: node.id,
+      status: node.status,
+      provider: node.provider,
+      endpoint: node.endpoint_url,
+      health: node.health_score,
+      lastHeartbeat: node.last_heartbeat_at,
+      clusterName: node.cluster_name // Assuming backend returns this, if not we might need to update backend or use ID
+    }));
   } catch (err) {
     console.warn("Using mock node data", err);
     return [
       {
         id: "node-1",
         status: "active",
-        model: "llama-3-70b",
-        region: "us-east"
-      },
-      {
-        id: "node-2",
-        status: "initializing",
-        model: "mistral-7b",
-        region: "eu-west"
+        provider: "aws",
+        endpoint: "https://node-1.crosslogic.ai",
+        health: 98.5,
+        lastHeartbeat: new Date().toISOString(),
+        clusterName: "cic-node-1"
       }
     ];
   }
 }
 
-export type { UsagePoint, ApiKey, NodeSummary };
+export async function launchNode(req: LaunchNodeRequest): Promise<LaunchNodeResponse> {
+  return await adminFetch<LaunchNodeResponse>("/admin/nodes/launch", {
+    method: "POST",
+    body: JSON.stringify(req)
+  });
+}
 
+export async function terminateNode(clusterName: string): Promise<void> {
+  await adminFetch(`/admin/nodes/${clusterName}/terminate`, {
+    method: "POST"
+  });
+}
+
+export type { UsageHourly, Node, ApiKey, UsagePoint, NodeSummary, CreateApiKeyResponse, LaunchNodeRequest, LaunchNodeResponse };
