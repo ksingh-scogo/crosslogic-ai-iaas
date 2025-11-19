@@ -65,8 +65,12 @@ func (g *Gateway) setupRoutes() {
 	g.router.Use(middleware.RequestID)
 	g.router.Use(middleware.RealIP)
 	g.router.Use(g.loggerMiddleware)
+	g.router.Use(g.metricsMiddleware) // Add metrics middleware
 	g.router.Use(middleware.Recoverer)
 	g.router.Use(middleware.Timeout(60 * time.Second))
+
+	// Metrics endpoint
+	g.registerMetrics()
 
 	// Health check (no auth required)
 	g.router.Get("/health", g.handleHealth)
@@ -104,6 +108,15 @@ func (g *Gateway) setupRoutes() {
 
 		// Usage and billing
 		r.Get("/admin/usage/{tenant_id}", g.handleGetUsage)
+
+		// API Keys
+		r.Get("/admin/api-keys/{tenant_id}", g.handleListAPIKeys)
+		r.Post("/admin/api-keys", g.handleCreateAPIKey)
+		r.Delete("/admin/api-keys/{key_id}", g.handleRevokeAPIKey)
+
+		// Tenant management
+		r.Post("/admin/tenants", g.handleCreateTenant)
+		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
 	})
 }
 
@@ -122,6 +135,7 @@ func (g *Gateway) loggerMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(ww, r)
 
 		g.logger.Info("request",
+			zap.String("request_id", middleware.GetReqID(r.Context())),
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
 			zap.Int("status", ww.Status()),
@@ -221,6 +235,7 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 
 		// Audit log for admin actions
 		g.logger.Info("admin action authenticated",
+			zap.String("request_id", middleware.GetReqID(r.Context())),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
@@ -347,6 +362,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Handle streaming response
 		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
 		if err != nil {
+			vllmProxyErrors.WithLabelValues(node.ID.String(), "streaming_failed").Inc()
 			g.logger.Error("streaming failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
@@ -374,6 +390,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Handle non-streaming response
 		resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
 		if err != nil {
+			vllmProxyErrors.WithLabelValues(node.ID.String(), "forward_failed").Inc()
 			g.logger.Error("request forwarding failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
@@ -529,6 +546,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
 		if err != nil {
+			vllmProxyErrors.WithLabelValues(node.ID.String(), "streaming_failed").Inc()
 			g.logger.Error("streaming failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
@@ -556,6 +574,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// Handle non-streaming response
 		resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
 		if err != nil {
+			vllmProxyErrors.WithLabelValues(node.ID.String(), "forward_failed").Inc()
 			g.logger.Error("request forwarding failed",
 				zap.Error(err),
 				zap.String("node_id", node.ID.String()),
@@ -696,6 +715,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	// Forward request to vLLM node (embeddings are not streamed)
 	resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
 	if err != nil {
+		vllmProxyErrors.WithLabelValues(node.ID.String(), "embedding_failed").Inc()
 		g.logger.Error("request forwarding failed",
 			zap.Error(err),
 			zap.String("node_id", node.ID.String()),
