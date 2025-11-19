@@ -19,6 +19,7 @@ const (
 	// Node events
 	EventNodeLaunched         EventType = "node.launched"
 	EventNodeTerminated       EventType = "node.terminated"
+	EventNodeHealthChanged    EventType = "node.health_changed"
 	EventNodeHealthDegraded   EventType = "node.health_degraded"
 	EventNodeDraining         EventType = "node.draining"
 

@@ -578,6 +578,12 @@ func (o *SkyPilotOrchestrator) GetNodeStatus(ctx context.Context, clusterName st
 	return "UNKNOWN", nil
 }
 
+// GetClusterStatus is an alias for GetNodeStatus for semantic clarity
+// in the monitoring context. It returns the status of a SkyPilot cluster.
+func (o *SkyPilotOrchestrator) GetClusterStatus(clusterName string) (string, error) {
+	return o.GetNodeStatus(context.Background(), clusterName)
+}
+
 // ListNodes returns all active GPU nodes managed by SkyPilot.
 //
 // This queries the local SkyPilot database for all clusters with the

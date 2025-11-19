@@ -47,10 +47,11 @@ This will start:
 - PostgreSQL (main database) on port 5432
 - PostgreSQL (SkyPilot state) on port 5433
 - Redis (cache + JuiceFS metadata) on port 6379
-- MinIO (S3-compatible storage) on ports 9000 (API) and 9001 (Console)
 - Control Plane API on port 8080
 - Prometheus on port 9091 (optional)
 - Grafana on port 3000 (optional)
+
+**Note:** Model storage uses your AWS S3 bucket configured in `.env`
 
 ### 4. Verify Services
 
@@ -76,11 +77,6 @@ crosslogic-control-plane    Up
 ```bash
 curl http://localhost:8080/health
 ```
-
-**MinIO Console:**
-Open http://localhost:9001 in browser
-- Username: `minioadmin`
-- Password: `minioadmin123`
 
 **Grafana (optional):**
 Open http://localhost:3000

@@ -92,11 +92,11 @@ func main() {
 	logger.Info("initialized SkyPilot orchestrator")
 
 	// Initialize Triple Safety Monitor
-	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch)
+	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch, eventBus)
 	logger.Info("initialized triple safety monitor")
 
-	// Initialize State Reconciler
-	reconciler := orchestrator.NewStateReconciler(db, logger, orch)
+	// Initialize State Reconciler with Triple Safety Monitor integration
+	reconciler := orchestrator.NewStateReconciler(db, logger, orch, monitor)
 	logger.Info("initialized state reconciler")
 
 	// Start background services context
