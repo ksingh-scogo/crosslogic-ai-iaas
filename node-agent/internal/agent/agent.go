@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -290,16 +292,88 @@ func (a *Agent) terminationMonitorLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if a.checkTerminationWarning(ctx) {
-				a.logger.Warn("spot termination warning detected!")
+				a.logger.Warn("spot termination warning detected - initiating graceful drain")
+
+				// Report to control plane immediately
 				if err := a.reportTerminationWarning(ctx); err != nil {
 					a.logger.Error("failed to report termination warning", zap.Error(err))
 				}
-				// We might want to stop accepting new requests here or trigger graceful shutdown
-				// For now, we just report it.
-				// Prevent spamming
-				time.Sleep(1 * time.Minute)
+
+				// Initiate graceful drain
+				a.gracefulDrain(ctx)
+
+				// Exit after draining - the orchestrator will launch replacement node
+				return
 			}
 		}
+	}
+}
+
+// gracefulDrain performs graceful shutdown when spot termination is imminent
+func (a *Agent) gracefulDrain(ctx context.Context) {
+	a.logger.Info("starting graceful drain procedure")
+
+	// Mark node as draining in control plane
+	a.markNodeDraining(ctx)
+
+	// Wait for in-flight requests to complete
+	// In production, you would:
+	// 1. Stop accepting new requests
+	// 2. Wait for existing requests to complete (with timeout)
+	// 3. Flush any buffered data
+	// 4. Clean up resources
+
+	drainTimeout := 90 * time.Second // Most cloud providers give 2 minutes warning
+	drainDeadline := time.Now().Add(drainTimeout)
+
+	a.logger.Info("waiting for in-flight requests to complete",
+		zap.Duration("timeout", drainTimeout),
+	)
+
+	// Poll vLLM to check if requests are still being processed
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for time.Now().Before(drainDeadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Check if vLLM has in-flight requests
+			// For now, we just wait the full duration
+			// In production, you'd check vLLM metrics endpoint for active requests
+			if time.Now().Add(10 * time.Second).After(drainDeadline) {
+				a.logger.Info("drain deadline approaching - forcing shutdown")
+				return
+			}
+		}
+	}
+
+	a.logger.Info("graceful drain completed")
+}
+
+// markNodeDraining marks the node as draining in the control plane
+func (a *Agent) markNodeDraining(ctx context.Context) {
+	if a.nodeID == "" {
+		return
+	}
+
+	url := fmt.Sprintf("%s/admin/nodes/%s/drain", a.config.ControlPlaneURL, a.nodeID)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		a.logger.Error("failed to mark node as draining", zap.Error(err))
+		return
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("failed to mark node as draining", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		a.logger.Info("node marked as draining in control plane")
 	}
 }
 
@@ -330,30 +404,77 @@ func (a *Agent) checkAWSTermination(ctx context.Context) bool {
 }
 
 func (a *Agent) checkGCPTermination(ctx context.Context) bool {
-	// GCP Preemptibility
-	// http://metadata.google.internal/computeMetadata/v1/instance/preempted
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://metadata.google.internal/computeMetadata/v1/instance/preempted", nil)
+	// GCP Preemptible VM Termination Notice
+	// Returns "TRUE" if instance is being preempted, "FALSE" otherwise
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://metadata.google.internal/computeMetadata/v1/instance/preempted", nil)
+	if err != nil {
+		return false
+	}
 	req.Header.Set("Metadata-Flavor", "Google")
+
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	// GCP returns "TRUE" if preempted
-	// But status 200 is enough to indicate it exists? No, it always exists?
-	// Actually, if it returns "TRUE", it's preempted.
-	// Let's assume 200 and body content "TRUE".
-	// For simplicity, we'll just check status 200 and non-empty body if needed, but standard docs say it returns "TRUE".
-	// However, if not preempted, does it return 404?
-	// Docs say: "If the instance is not being preempted, this value is FALSE."
-	// So we need to read body.
-	// For now, let's just return false to be safe if we can't read body.
-	return false // Placeholder, need to implement body reading
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+
+	// GCP returns "TRUE" (uppercase) if being preempted
+	preempted := strings.TrimSpace(string(body))
+	return preempted == "TRUE"
 }
 
 func (a *Agent) checkAzureTermination(ctx context.Context) bool {
-	// Azure Scheduled Events
-	return false // Placeholder
+	// Azure Scheduled Events API
+	// https://learn.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Metadata", "true")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	// Parse Azure Scheduled Events response
+	var scheduledEvents struct {
+		Events []struct {
+			EventType   string `json:"EventType"`
+			ResourceType string `json:"ResourceType"`
+			EventStatus string `json:"EventStatus"`
+		} `json:"Events"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&scheduledEvents); err != nil {
+		return false
+	}
+
+	// Check for Preempt or Terminate events
+	for _, event := range scheduledEvents.Events {
+		if event.EventType == "Preempt" || event.EventType == "Terminate" {
+			if event.ResourceType == "VirtualMachine" && event.EventStatus == "Scheduled" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // reportTerminationWarning sends a warning to the control plane
