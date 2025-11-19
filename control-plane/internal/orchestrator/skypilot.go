@@ -166,8 +166,8 @@ name: {{.ClusterName}}
 
 resources:
   accelerators: {{.GPU}}:{{.GPUCount}}
-  cloud: {{.Provider}}
-  region: {{.Region}}
+  {{if .Provider}}cloud: {{.Provider}}{{end}}
+  {{if .Region}}region: {{.Region}}{{end}}
   {{if .UseSpot}}use_spot: true
   spot_recovery: true{{else}}use_spot: false{{end}}
   disk_size: {{.DiskSize}}
@@ -240,6 +240,10 @@ run: |
     --port 8000 \
     --gpu-memory-utilization 0.9 \
     --max-num-seqs 256 \
+    --max-model-len 32768 \
+    --enable-prefix-caching \
+    --kv-cache-dtype fp8 \
+    --quantization fp8 \
     --disable-log-requests \
     --tensor-parallel-size {{.TensorParallel}} \
 {{- if .VLLMArgs }}

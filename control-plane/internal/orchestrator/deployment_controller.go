@@ -10,6 +10,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// LoadBalancer interface to avoid import cycle with gateway
+type LoadBalancer interface {
+	GetAverageLatency(ctx context.Context, modelName string) (time.Duration, error)
+}
+
 // Deployment represents a managed set of GPU nodes serving a model.
 type Deployment struct {
 	ID              string
@@ -29,16 +34,18 @@ type DeploymentController struct {
 	db           *database.Database
 	logger       *zap.Logger
 	orchestrator *SkyPilotOrchestrator
+	loadBalancer LoadBalancer
 	ticker       *time.Ticker
 	stopChan     chan struct{}
 }
 
 // NewDeploymentController creates a new deployment controller.
-func NewDeploymentController(db *database.Database, logger *zap.Logger, orch *SkyPilotOrchestrator) *DeploymentController {
+func NewDeploymentController(db *database.Database, logger *zap.Logger, orch *SkyPilotOrchestrator, lb LoadBalancer) *DeploymentController {
 	return &DeploymentController{
 		db:           db,
 		logger:       logger,
 		orchestrator: orch,
+		loadBalancer: lb,
 		stopChan:     make(chan struct{}),
 	}
 }
@@ -160,6 +167,37 @@ func (c *DeploymentController) reconcileDeployment(ctx context.Context, d Deploy
 		return c.scaleDown(ctx, d, excess)
 	}
 
+	// Scale Up based on metrics (Latency)
+	if err := c.checkScalingMetrics(ctx, d, activeNodes); err != nil {
+		c.logger.Error("failed to check scaling metrics", zap.Error(err))
+	}
+
+	return nil
+}
+
+func (c *DeploymentController) checkScalingMetrics(ctx context.Context, d Deployment, activeNodes int) error {
+	// Don't scale if we are already at max replicas
+	if activeNodes >= d.MaxReplicas {
+		return nil
+	}
+
+	// Get average latency from load balancer
+	avgLatency, err := c.loadBalancer.GetAverageLatency(ctx, d.ModelName)
+	if err != nil {
+		return err
+	}
+
+	// Threshold: 200ms (from plan)
+	if avgLatency > 200*time.Millisecond {
+		c.logger.Info("high latency detected, scaling up",
+			zap.String("deployment", d.Name),
+			zap.Duration("avg_latency", avgLatency),
+		)
+		// Scale up by 1
+		return c.scaleUp(ctx, d, 1)
+	}
+
+	// TODO: Scale down logic based on low latency (optional for now)
 	return nil
 }
 

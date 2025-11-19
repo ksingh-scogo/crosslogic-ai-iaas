@@ -155,7 +155,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.test.com"
-	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -176,7 +176,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 
 	// Verify YAML contains expected content
 	expectedStrings := []string{
-		"name: cic-" + config.NodeID,
+		"name: cic-test-cluster",
 		"accelerators: A100:1",
 		"cloud: aws",
 		"region: us-west-2",
@@ -535,7 +535,7 @@ func TestConcurrentYAMLGeneration(t *testing.T) {
 				Model:    "test-model",
 			}
 
-			_, err := orch.generateTaskYAML(config)
+			_, err := orch.generateTaskYAML(config, "test-cluster")
 			if err != nil {
 				errors <- err
 			}
