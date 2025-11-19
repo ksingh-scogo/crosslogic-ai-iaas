@@ -90,9 +90,21 @@ func main() {
 	}
 	logger.Info("initialized SkyPilot orchestrator")
 
+	// Initialize Triple Safety Monitor
+	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch)
+	logger.Info("initialized triple safety monitor")
+
+	// Initialize State Reconciler
+	reconciler := orchestrator.NewStateReconciler(db, logger, orch)
+	logger.Info("initialized state reconciler")
+
 	// Start background services
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start monitor and reconciler
+	monitor.Start(ctx)
+	reconciler.Start(ctx)
 
 	// Start billing background jobs
 	billingEngine.StartBackgroundJobs(ctx)
@@ -104,7 +116,7 @@ func main() {
 	logger.Info("started notification service")
 
 	// Initialize API gateway with event bus
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, cfg.Security.AdminAPIToken, eventBus)
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
 	gw.StartHealthMetrics(ctx)
 	logger.Info("initialized API gateway")
 

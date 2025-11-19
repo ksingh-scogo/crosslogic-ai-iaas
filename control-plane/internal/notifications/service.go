@@ -422,7 +422,7 @@ func (s *Service) isDuplicate(ctx context.Context, eventID string) bool {
 		s.logger.Error("failed to check duplicate", zap.Error(err))
 		return false
 	}
-	return exists
+	return exists > 0
 }
 
 // markProcessed marks an event as processed

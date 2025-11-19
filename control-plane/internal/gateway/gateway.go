@@ -38,12 +38,13 @@ type Gateway struct {
 	vllmProxy      *scheduler.VLLMProxy
 	webhookHandler *billing.WebhookHandler
 	orchestrator   *orchestrator.SkyPilotOrchestrator
+	monitor        *orchestrator.TripleSafetyMonitor
 	adminToken     string
 	eventBus       *events.Bus
 }
 
 // NewGateway creates a new API gateway
-func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, adminToken string, eventBus *events.Bus) *Gateway {
+func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, monitor *orchestrator.TripleSafetyMonitor, adminToken string, eventBus *events.Bus) *Gateway {
 	g := &Gateway{
 		db:             db,
 		cache:          cache,
@@ -55,6 +56,7 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 		vllmProxy:      scheduler.NewVLLMProxy(logger),
 		webhookHandler: webhookHandler,
 		orchestrator:   orch,
+		monitor:        monitor,
 		adminToken:     adminToken,
 		eventBus:       eventBus,
 	}
@@ -119,6 +121,8 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/nodes/launch", g.handleLaunchNode)
 		r.Post("/admin/nodes/{cluster_name}/terminate", g.handleTerminateNode)
 		r.Get("/admin/nodes/{cluster_name}/status", g.handleNodeStatus)
+		r.Post("/admin/nodes/{node_id}/heartbeat", g.handleHeartbeat)
+		r.Post("/admin/nodes/{node_id}/termination-warning", g.handleTerminationWarning)
 
 		// Usage and billing
 		r.Get("/admin/usage/{tenant_id}", g.handleGetUsage)
@@ -133,6 +137,59 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
 		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
 	})
+}
+
+func (g *Gateway) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		g.writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	var req struct {
+		HealthScore float64 `json:"health_score"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		g.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := g.monitor.RecordHeartbeat(r.Context(), nodeID, req.HealthScore); err != nil {
+		g.logger.Error("failed to record heartbeat", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to record heartbeat")
+		return
+	}
+
+	g.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) handleTerminationWarning(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		g.writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	g.logger.Warn("received spot termination warning", zap.String("node_id", nodeID))
+
+	// Mark node as terminating
+	query := `UPDATE nodes SET status = 'terminating', status_message = 'spot_termination_warning' WHERE id = $1`
+	_, err := g.db.Pool.Exec(r.Context(), query, nodeID)
+	if err != nil {
+		g.logger.Error("failed to update node status", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to process warning")
+		return
+	}
+
+	// Publish event
+	if g.eventBus != nil {
+		g.eventBus.Publish(r.Context(), events.NewEvent(events.EventNodeTerminated, "", map[string]interface{}{
+			"node_id": nodeID,
+			"reason":  "spot_termination",
+		}))
+	}
+
+	g.writeJSON(w, http.StatusOK, map[string]string{"status": "received"})
 }
 
 // StartHealthMetrics starts a background goroutine to update dependency health metrics
