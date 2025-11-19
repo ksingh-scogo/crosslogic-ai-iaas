@@ -84,6 +84,7 @@ func main() {
 		cfg.Runtime.VLLMVersion,
 		cfg.Runtime.TorchVersion,
 		eventBus,
+		cfg.JuiceFS,
 	)
 	if err != nil {
 		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
@@ -98,6 +99,10 @@ func main() {
 	reconciler := orchestrator.NewStateReconciler(db, logger, orch)
 	logger.Info("initialized state reconciler")
 
+	// Initialize Deployment Controller
+	deploymentController := orchestrator.NewDeploymentController(db, logger, orch)
+	logger.Info("initialized deployment controller")
+
 	// Start background services
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -105,6 +110,7 @@ func main() {
 	// Start monitor and reconciler
 	monitor.Start(ctx)
 	reconciler.Start(ctx)
+	deploymentController.Start(ctx)
 
 	// Start billing background jobs
 	billingEngine.StartBackgroundJobs(ctx)

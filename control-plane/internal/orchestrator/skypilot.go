@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/crosslogic/control-plane/internal/config"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
@@ -63,8 +64,12 @@ type SkyPilotOrchestrator struct {
 	controlPlaneURL string
 
 	// runtime versions for dependency pinning
+	// runtime versions for dependency pinning
 	vllmVersion  string
 	torchVersion string
+
+	// juiceFSConfig holds JuiceFS configuration
+	juiceFSConfig config.JuiceFSConfig
 }
 
 // NodeConfig defines the configuration for launching a new GPU node.
@@ -105,6 +110,9 @@ type NodeConfig struct {
 
 	// TensorParallel is the tensor parallel size for vLLM (usually equals GPUCount)
 	TensorParallel int `json:"tensor_parallel"`
+
+	// DeploymentID links this node to a deployment (optional)
+	DeploymentID string `json:"deployment_id,omitempty"`
 }
 
 // GenerateClusterName generates a unique cluster name based on the naming convention.
@@ -173,13 +181,19 @@ setup: |
   curl -sSL https://d.juicefs.com/install | sh -
 
   echo "=== Configuring JuiceFS ==="
-  # Note: Credentials should be injected via env vars or secrets in a real prod env
-  # For now, we assume they are available or use placeholders
-  # export REDIS_URL="redis://crosslogic-juicefs.cache.amazonaws.com:6379/0"
-  # juicefs format --storage s3 --bucket https://s3.amazonaws.com/crosslogic-models redis://${REDIS_URL} crosslogic-models || true
-  
-  mkdir -p /mnt/models
-  # juicefs mount crosslogic-models /mnt/models --cache-dir /nvme/juicefs-cache --cache-size 500000 --buffer-size 1024 --prefetch 3 --writeback --background || echo "JuiceFS mount failed, continuing..."
+  export REDIS_URL="{{.JuiceFSRedisURL}}"
+  export ACCESS_KEY="{{.JuiceFSAccessKey}}"
+  export SECRET_KEY="{{.JuiceFSSecretKey}}"
+  export BUCKET="{{.JuiceFSBucket}}"
+
+  if [ -n "$REDIS_URL" ] && [ -n "$BUCKET" ]; then
+    juicefs format --storage s3 --bucket "$BUCKET" --access-key "$ACCESS_KEY" --secret-key "$SECRET_KEY" redis://${REDIS_URL} crosslogic-models || true
+    
+    mkdir -p /mnt/models
+    juicefs mount crosslogic-models /mnt/models --cache-dir /nvme/juicefs-cache --cache-size 500000 --buffer-size 1024 --prefetch 3 --writeback --background || echo "JuiceFS mount failed, continuing..."
+  else
+    echo "JuiceFS configuration missing, skipping mount"
+  fi
 
   echo "=== Installing Python and vLLM ==="
   # Install Python 3.10 if not present
@@ -291,8 +305,9 @@ run: |
 //	    database,
 //	    logger,
 //	    "https://api.crosslogic.ai",
+//	    "https://api.crosslogic.ai",
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus, juiceFSConfig config.JuiceFSConfig) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
@@ -307,6 +322,7 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		controlPlaneURL: controlPlaneURL,
 		vllmVersion:     vllmVersion,
 		torchVersion:    torchVersion,
+		juiceFSConfig:   juiceFSConfig,
 	}, nil
 }
 
@@ -592,6 +608,32 @@ func (o *SkyPilotOrchestrator) ListNodes(ctx context.Context) ([]string, error) 
 	return nodeNames, nil
 }
 
+// ExecCommand executes a command on a running node.
+//
+// Uses `sky exec` to run the command via SSH.
+//
+// Returns:
+// - string: Command output (stdout + stderr)
+// - error: Execution failure
+func (o *SkyPilotOrchestrator) ExecCommand(ctx context.Context, clusterName, command string) (string, error) {
+	o.logger.Debug("executing command on node",
+		zap.String("cluster_name", clusterName),
+		zap.String("command", command),
+	)
+
+	cmd := exec.CommandContext(ctx, "sky", "exec",
+		clusterName,
+		command,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sky exec failed: %w\nOutput: %s", err, output)
+	}
+
+	return string(output), nil
+}
+
 // validateNodeConfig validates and sets defaults for node configuration.
 func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 	// Validate required fields
@@ -666,21 +708,25 @@ func sanitizeVLLMArgs(args string) (string, error) {
 func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig, clusterName string) (string, error) {
 	// Prepare template data
 	data := map[string]interface{}{
-		"NodeID":          config.NodeID,
-		"ClusterName":     clusterName,
-		"Provider":        config.Provider,
-		"Region":          config.Region,
-		"GPU":             config.GPU,
-		"GPUCount":        config.GPUCount,
-		"Model":           config.Model,
-		"UseSpot":         config.UseSpot,
-		"DiskSize":        config.DiskSize,
-		"VLLMArgs":        config.VLLMArgs,
-		"TensorParallel":  config.TensorParallel,
-		"ControlPlaneURL": o.controlPlaneURL,
-		"VLLMVersion":     o.vllmVersion,
-		"TorchVersion":    o.torchVersion,
-		"Timestamp":       time.Now().Format(time.RFC3339),
+		"NodeID":           config.NodeID,
+		"ClusterName":      clusterName,
+		"Provider":         config.Provider,
+		"Region":           config.Region,
+		"GPU":              config.GPU,
+		"GPUCount":         config.GPUCount,
+		"Model":            config.Model,
+		"UseSpot":          config.UseSpot,
+		"DiskSize":         config.DiskSize,
+		"VLLMArgs":         config.VLLMArgs,
+		"TensorParallel":   config.TensorParallel,
+		"ControlPlaneURL":  o.controlPlaneURL,
+		"VLLMVersion":      o.vllmVersion,
+		"TorchVersion":     o.torchVersion,
+		"Timestamp":        time.Now().Format(time.RFC3339),
+		"JuiceFSRedisURL":  o.juiceFSConfig.RedisURL,
+		"JuiceFSBucket":    o.juiceFSConfig.Bucket,
+		"JuiceFSAccessKey": o.juiceFSConfig.AccessKey,
+		"JuiceFSSecretKey": o.juiceFSConfig.SecretKey,
 	}
 
 	// Execute template
@@ -697,8 +743,8 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 	query := `
 		INSERT INTO nodes (
 			id, cluster_name, provider, region, gpu_type,
-			model_name, status, endpoint, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'initializing', '', NOW())
+			model_name, status, endpoint, created_at, deployment_id
+		) VALUES ($1, $2, $3, $4, $5, $6, 'initializing', '', NOW(), $7)
 		ON CONFLICT (id) DO UPDATE
 		SET cluster_name = $2, status = 'initializing', updated_at = NOW()
 	`
@@ -708,6 +754,15 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 		return fmt.Errorf("invalid node ID: %w", err)
 	}
 
+	var deploymentID *uuid.UUID
+	if config.DeploymentID != "" {
+		id, err := uuid.Parse(config.DeploymentID)
+		if err != nil {
+			return fmt.Errorf("invalid deployment ID: %w", err)
+		}
+		deploymentID = &id
+	}
+
 	_, err = o.db.Pool.Exec(ctx, query,
 		nodeID,
 		clusterName,
@@ -715,6 +770,7 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 		config.Region,
 		config.GPU,
 		config.Model,
+		deploymentID,
 	)
 
 	return err
@@ -746,6 +802,7 @@ func NewModelConfigGenerator() *ModelConfigGenerator {
 			"meta-llama/Llama-2-70b-chat-hf":    70_000_000_000,
 			"meta-llama/Llama-3-8b-instruct":    8_000_000_000,
 			"meta-llama/Llama-3-70b-instruct":   70_000_000_000,
+			"meta-llama/Llama-3-405b-instruct":  405_000_000_000,
 			"deepseek-ai/deepseek-llm-67b-chat": 67_000_000_000,
 		},
 	}

@@ -16,6 +16,7 @@ type Config struct {
 	Security   SecurityConfig
 	Runtime    RuntimeConfig
 	Monitoring MonitoringConfig
+	JuiceFS    JuiceFSConfig
 }
 
 // ServerConfig holds server configuration
@@ -82,6 +83,14 @@ type MonitoringConfig struct {
 	LogLevel       string
 }
 
+// JuiceFSConfig holds JuiceFS configuration
+type JuiceFSConfig struct {
+	RedisURL  string
+	Bucket    string
+	AccessKey string
+	SecretKey string
+}
+
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
@@ -134,6 +143,12 @@ func LoadConfig() (*Config, error) {
 			PrometheusPort: getEnvAsInt("PROMETHEUS_PORT", 9090),
 			MetricsPath:    getEnv("METRICS_PATH", "/metrics"),
 			LogLevel:       getEnv("LOG_LEVEL", "info"),
+		},
+		JuiceFS: JuiceFSConfig{
+			RedisURL:  getEnv("JUICEFS_REDIS_URL", ""),
+			Bucket:    getEnv("JUICEFS_BUCKET", ""),
+			AccessKey: getEnv("JUICEFS_ACCESS_KEY", ""),
+			SecretKey: getEnv("JUICEFS_SECRET_KEY", ""),
 		},
 	}
 
