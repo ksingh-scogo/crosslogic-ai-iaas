@@ -13,20 +13,29 @@ import (
 )
 
 // StateReconciler ensures the database state matches the actual cloud state.
+// This is the third layer of the triple safety monitoring system.
 type StateReconciler struct {
 	db           *database.Database
 	logger       *zap.Logger
 	orchestrator *SkyPilotOrchestrator
+	monitor      *TripleSafetyMonitor
 	interval     time.Duration
+
+	// Configuration
+	autoTerminateOrphans bool // Automatically terminate orphan clusters
+	orphanGracePeriod    time.Duration // Grace period before terminating orphans
 }
 
 // NewStateReconciler creates a new state reconciler.
-func NewStateReconciler(db *database.Database, logger *zap.Logger, orch *SkyPilotOrchestrator) *StateReconciler {
+func NewStateReconciler(db *database.Database, logger *zap.Logger, orch *SkyPilotOrchestrator, monitor *TripleSafetyMonitor) *StateReconciler {
 	return &StateReconciler{
-		db:           db,
-		logger:       logger,
-		orchestrator: orch,
-		interval:     5 * time.Minute,
+		db:                   db,
+		logger:               logger,
+		orchestrator:         orch,
+		monitor:              monitor,
+		interval:             1 * time.Minute, // More frequent reconciliation
+		autoTerminateOrphans: true,
+		orphanGracePeriod:    10 * time.Minute, // 10 minute grace period
 	}
 }
 
@@ -125,13 +134,35 @@ func (r *StateReconciler) getDBNodes(ctx context.Context) (map[string]string, er
 
 // detectOrphans: Clusters in SkyPilot but not in DB (or terminated in DB)
 func (r *StateReconciler) detectOrphans(ctx context.Context, skyClusters map[string]SkyPilotCluster, dbNodes map[string]string) {
-	for name := range skyClusters {
+	for name, cluster := range skyClusters {
 		if _, exists := dbNodes[name]; !exists {
-			r.logger.Warn("found orphan cluster", zap.String("cluster_name", name))
-			// Action: Terminate orphan to save cost
-			// In production, might want to check age or manual override
-			// For now, log and maybe terminate
-			// r.orchestrator.TerminateNode(ctx, name)
+			r.logger.Warn("found orphan cluster",
+				zap.String("cluster_name", name),
+				zap.String("status", cluster.Status),
+				zap.String("region", cluster.Region),
+			)
+
+			// Automatically terminate orphans to prevent cost leakage
+			if r.autoTerminateOrphans {
+				// Check if cluster has existed beyond grace period
+				// For now, terminate immediately as we can't get creation time easily
+				// In production, you might want to tag clusters with creation time
+
+				r.logger.Info("terminating orphan cluster to prevent cost leakage",
+					zap.String("cluster_name", name),
+				)
+
+				if err := r.orchestrator.TerminateNode(ctx, name); err != nil {
+					r.logger.Error("failed to terminate orphan cluster",
+						zap.String("cluster_name", name),
+						zap.Error(err),
+					)
+				} else {
+					r.logger.Info("successfully terminated orphan cluster",
+						zap.String("cluster_name", name),
+					)
+				}
+			}
 		}
 	}
 }
@@ -141,12 +172,53 @@ func (r *StateReconciler) detectGhosts(ctx context.Context, skyClusters map[stri
 	for name, status := range dbNodes {
 		if _, exists := skyClusters[name]; !exists {
 			// If DB says active/provisioning but SkyPilot doesn't have it
-			if status == "active" || status == "provisioning" {
-				r.logger.Warn("found ghost cluster", zap.String("cluster_name", name), zap.String("db_status", status))
-				// Action: Mark as terminated or failed in DB
-				r.updateDBStatus(ctx, name, "failed", "ghost_detected")
+			if status == "active" || status == "provisioning" || status == "suspect" || status == "degraded" {
+				r.logger.Warn("found ghost cluster",
+					zap.String("cluster_name", name),
+					zap.String("db_status", status),
+				)
+
+				// Ghost clusters should be marked as dead
+				// This feeds back into the triple safety monitor
+				r.updateDBStatus(ctx, name, "dead", "ghost_detected_by_reconciler")
+
+				// Find node ID and trigger health evaluation
+				if r.monitor != nil {
+					go r.markGhostNodeForInvestigation(ctx, name)
+				}
 			}
 		}
+	}
+}
+
+// markGhostNodeForInvestigation finds the node ID and triggers health signal update
+func (r *StateReconciler) markGhostNodeForInvestigation(ctx context.Context, clusterName string) {
+	// Get node ID from cluster name
+	var nodeID string
+	err := r.db.Pool.QueryRow(ctx,
+		"SELECT id FROM nodes WHERE cluster_name = $1",
+		clusterName,
+	).Scan(&nodeID)
+
+	if err != nil {
+		r.logger.Error("failed to find node for ghost cluster",
+			zap.String("cluster_name", clusterName),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Store a cloud API signal indicating the cluster is not found
+	if r.monitor != nil {
+		r.monitor.storeHealthSignal(nodeID, HealthSignal{
+			Healthy:   false,
+			Timestamp: time.Now(),
+			Source:    "cloud_api",
+			Message:   "cluster_not_found_by_reconciler",
+		})
+
+		// Trigger health evaluation
+		r.monitor.evaluateNodeHealth(ctx, nodeID)
 	}
 }
 
@@ -159,15 +231,25 @@ func (r *StateReconciler) syncStatus(ctx context.Context, skyClusters map[string
 			skyStatus := strings.ToUpper(skyCluster.Status)
 
 			var newStatus string
+			healthy := false
 			switch skyStatus {
 			case "UP":
 				newStatus = "active"
+				healthy = true
 			case "INIT", "PROVISIONING":
 				newStatus = "provisioning"
+				healthy = true // Provisioning is healthy
 			case "STOPPED", "AUTOSTOPPED":
 				newStatus = "stopped"
+				healthy = false
 			default:
 				newStatus = "unknown"
+				healthy = false
+			}
+
+			// Update triple safety monitor with cloud API signal
+			if r.monitor != nil {
+				go r.updateMonitorSignal(ctx, name, healthy, fmt.Sprintf("cloud_status=%s", skyStatus))
 			}
 
 			if newStatus != dbStatus && newStatus != "unknown" {
@@ -180,6 +262,32 @@ func (r *StateReconciler) syncStatus(ctx context.Context, skyClusters map[string
 			}
 		}
 	}
+}
+
+// updateMonitorSignal sends a cloud API health signal to the triple safety monitor
+func (r *StateReconciler) updateMonitorSignal(ctx context.Context, clusterName string, healthy bool, message string) {
+	// Get node ID from cluster name
+	var nodeID string
+	err := r.db.Pool.QueryRow(ctx,
+		"SELECT id FROM nodes WHERE cluster_name = $1",
+		clusterName,
+	).Scan(&nodeID)
+
+	if err != nil {
+		// Node might not exist yet, ignore
+		return
+	}
+
+	// Store cloud API signal
+	r.monitor.storeHealthSignal(nodeID, HealthSignal{
+		Healthy:   healthy,
+		Timestamp: time.Now(),
+		Source:    "cloud_api",
+		Message:   message,
+	})
+
+	// Trigger health evaluation
+	r.monitor.evaluateNodeHealth(ctx, nodeID)
 }
 
 func (r *StateReconciler) updateDBStatus(ctx context.Context, clusterName, status, message string) {

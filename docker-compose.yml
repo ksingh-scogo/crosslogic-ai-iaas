@@ -59,45 +59,6 @@ services:
     networks:
       - crosslogic-network
 
-  # MinIO (S3-compatible storage for JuiceFS local development)
-  minio:
-    image: minio/minio:latest
-    container_name: crosslogic-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin123
-    ports:
-      - "9000:9000"  # S3 API
-      - "9001:9001"  # Web Console
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    networks:
-      - crosslogic-network
-
-  # MinIO Client (creates required buckets)
-  minio-setup:
-    image: minio/mc:latest
-    container_name: crosslogic-minio-setup
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      sleep 5;
-      mc alias set local http://minio:9000 minioadmin minioadmin123;
-      mc mb local/crosslogic-models --ignore-existing;
-      mc policy set download local/crosslogic-models;
-      echo 'MinIO bucket setup complete: crosslogic-models';
-      exit 0;
-      "
-    networks:
-      - crosslogic-network
-
   # Control Plane
   control-plane:
     build:
@@ -126,11 +87,11 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
 
-      # JuiceFS (for fast model loading)
+      # JuiceFS (for fast model loading via S3)
       - JUICEFS_REDIS_URL=redis://redis:6379/1
-      - JUICEFS_BUCKET=http://minio:9000/crosslogic-models
-      - JUICEFS_ACCESS_KEY=minioadmin
-      - JUICEFS_SECRET_KEY=minioadmin123
+      - JUICEFS_BUCKET=${JUICEFS_BUCKET}
+      - JUICEFS_ACCESS_KEY=${JUICEFS_ACCESS_KEY}
+      - JUICEFS_SECRET_KEY=${JUICEFS_SECRET_KEY}
 
       # Stripe (use test keys or set via .env)
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy}
@@ -154,8 +115,6 @@ services:
       postgres-skypilot:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     networks:
       - crosslogic-network
@@ -195,7 +154,6 @@ volumes:
   postgres_data:
   postgres_skypilot_data:
   redis_data:
-  minio_data:
   prometheus_data:
   grafana_data:
 
