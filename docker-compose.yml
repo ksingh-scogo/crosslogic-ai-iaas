@@ -22,10 +22,31 @@ services:
     networks:
       - crosslogic-network
 
-  # Redis Cache
+  # SkyPilot State Database (separate for SkyPilot state management)
+  postgres-skypilot:
+    image: postgres:16-alpine
+    container_name: crosslogic-skypilot-db
+    environment:
+      POSTGRES_DB: skypilot_state
+      POSTGRES_USER: crosslogic
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_skypilot_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crosslogic"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crosslogic-network
+
+  # Redis Cache & JuiceFS Metadata Store
   redis:
     image: redis:7-alpine
     container_name: crosslogic-redis
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
@@ -35,6 +56,45 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - crosslogic-network
+
+  # MinIO (S3-compatible storage for JuiceFS local development)
+  minio:
+    image: minio/minio:latest
+    container_name: crosslogic-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - crosslogic-network
+
+  # MinIO Client (creates required buckets)
+  minio-setup:
+    image: minio/mc:latest
+    container_name: crosslogic-minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 minioadmin minioadmin123;
+      mc mb local/crosslogic-models --ignore-existing;
+      mc policy set download local/crosslogic-models;
+      echo 'MinIO bucket setup complete: crosslogic-models';
+      exit 0;
+      "
     networks:
       - crosslogic-network
 
@@ -48,22 +108,54 @@ services:
       - "8080:8080"
       - "9090:9090"
     environment:
+      # Server
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
+      - CONTROL_PLANE_URL=http://localhost:8080
+
+      # Database
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=crosslogic
       - DB_PASSWORD=${DB_PASSWORD:-changeme}
       - DB_NAME=crosslogic_iaas
+      - DB_SSL_MODE=disable
+
+      # Redis
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
-      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
-      - LOG_LEVEL=info
+      - REDIS_DB=0
+
+      # JuiceFS (for fast model loading)
+      - JUICEFS_REDIS_URL=redis://redis:6379/1
+      - JUICEFS_BUCKET=http://minio:9000/crosslogic-models
+      - JUICEFS_ACCESS_KEY=minioadmin
+      - JUICEFS_SECRET_KEY=minioadmin123
+
+      # Stripe (use test keys or set via .env)
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-whsec_dummy}
+
+      # Security
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-dev_admin_token}
+      - JWT_SECRET=${JWT_SECRET:-dev_jwt_secret_minimum_32_chars}
+
+      # Runtime
+      - VLLM_VERSION=0.6.2
+      - TORCH_VERSION=2.4.0
+
+      # Monitoring
+      - LOG_LEVEL=debug
+      - MONITORING_ENABLED=true
+      - PROMETHEUS_PORT=9090
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-skypilot:
+        condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - crosslogic-network
@@ -101,7 +193,9 @@ services:
 
 volumes:
   postgres_data:
+  postgres_skypilot_data:
   redis_data:
+  minio_data:
   prometheus_data:
   grafana_data:
 

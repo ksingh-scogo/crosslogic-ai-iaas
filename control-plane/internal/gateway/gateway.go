@@ -39,7 +39,8 @@ type Gateway struct {
 	monitor        *orchestrator.TripleSafetyMonitor
 	adminToken     string
 	eventBus       *events.Bus
-	loadBalancer   *IntelligentLoadBalancer
+	// LoadBalancer handles intelligent request routing
+	LoadBalancer *IntelligentLoadBalancer
 }
 
 // NewGateway creates a new API gateway
@@ -56,7 +57,7 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 		monitor:        monitor,
 		adminToken:     adminToken,
 		eventBus:       eventBus,
-		loadBalancer:   NewIntelligentLoadBalancer(db, logger),
+		LoadBalancer:   NewIntelligentLoadBalancer(db, logger),
 	}
 
 	g.setupRoutes()
@@ -427,7 +428,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Select best endpoint
-	endpoint, err := g.loadBalancer.SelectEndpoint(ctx, req.Model)
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
 		g.logger.Error("failed to select endpoint", zap.Error(err))
 		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
@@ -449,7 +450,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	// Record stats
 	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
-	g.loadBalancer.RecordRequest(endpoint, duration, isError)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
 
 	if err != nil {
 		g.logger.Error("failed to proxy request", zap.Error(err))
@@ -509,7 +510,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Select best endpoint
-	endpoint, err := g.loadBalancer.SelectEndpoint(ctx, req.Model)
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
 		g.logger.Error("failed to select endpoint", zap.Error(err))
 		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
@@ -531,7 +532,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Record stats
 	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
-	g.loadBalancer.RecordRequest(endpoint, duration, isError)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
 
 	if err != nil {
 		g.logger.Error("failed to proxy request", zap.Error(err))
@@ -580,7 +581,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Select best endpoint
-	endpoint, err := g.loadBalancer.SelectEndpoint(ctx, req.Model)
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
 		g.logger.Error("failed to select endpoint", zap.Error(err))
 		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
@@ -602,7 +603,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 
 	// Record stats
 	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
-	g.loadBalancer.RecordRequest(endpoint, duration, isError)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
 
 	if err != nil {
 		g.logger.Error("failed to proxy request", zap.Error(err))

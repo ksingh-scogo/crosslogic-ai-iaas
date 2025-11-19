@@ -34,9 +34,40 @@ func NewIntelligentLoadBalancer(db *database.Database, logger *zap.Logger) *Inte
 	}
 }
 
+// GetAverageLatency returns the average latency for a model across all healthy nodes.
+func (lb *IntelligentLoadBalancer) GetAverageLatency(ctx context.Context, modelName string) (time.Duration, error) {
+	nodes, err := lb.getHealthyNodes(ctx, modelName)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(nodes) == 0 {
+		return 0, nil
+	}
+
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	var totalLatency time.Duration
+	var count int
+
+	for _, node := range nodes {
+		if stats, ok := lb.stats[node]; ok && stats.Latency > 0 {
+			totalLatency += stats.Latency
+			count++
+		}
+	}
+
+	if count == 0 {
+		return 0, nil
+	}
+
+	return time.Duration(int64(totalLatency) / int64(count)), nil
+}
+
 // SelectEndpoint chooses the best available endpoint for a model.
 //
-// Strategy: Weighted Round Robin (simplified for now)
+// Strategy: Weighted Score (Latency + Reliability)
 // - Filters for healthy nodes serving the model
 // - Prefers nodes with lower latency and error rates
 func (lb *IntelligentLoadBalancer) SelectEndpoint(ctx context.Context, modelName string) (string, error) {
@@ -50,24 +81,49 @@ func (lb *IntelligentLoadBalancer) SelectEndpoint(ctx context.Context, modelName
 		return "", nil // No nodes available
 	}
 
-	// Simple selection: Pick the one with lowest latency
-	// TODO: Implement full weighted round robin
-	bestNode := nodes[0]
-	minLatency := time.Hour // Start high
-
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
+
+	// Calculate scores
+	type nodeScore struct {
+		node  string
+		score float64
+	}
+	var scores []nodeScore
 
 	for _, node := range nodes {
 		stats, ok := lb.stats[node]
 		if !ok {
-			// No stats yet, treat as good candidate
-			return node, nil
+			// No stats yet, give it a high default score to encourage exploration
+			// Score = 1.0 (equivalent to 0ms latency and 0 errors in our formula roughly)
+			scores = append(scores, nodeScore{node: node, score: 2.0})
+			continue
 		}
 
-		if stats.Latency < minLatency {
-			minLatency = stats.Latency
-			bestNode = node
+		// Latency score: 1.0 / (latency_ms + 1)
+		// Example: 100ms -> 0.0099
+		// Example: 10ms -> 0.09
+		latencyMs := float64(stats.Latency.Milliseconds())
+		latencyScore := 1.0 / (latencyMs + 1.0)
+
+		// Error score: 1.0 / (error_count + 1)
+		errorScore := 1.0 / (float64(stats.ErrorCount) + 1.0)
+
+		// Combined score (weighted)
+		// 60% Latency, 40% Reliability
+		finalScore := (latencyScore * 0.6) + (errorScore * 0.4)
+
+		scores = append(scores, nodeScore{node: node, score: finalScore})
+	}
+
+	// Pick the highest score
+	var bestNode string
+	var maxScore float64 = -1.0
+
+	for _, ns := range scores {
+		if ns.score > maxScore {
+			maxScore = ns.score
+			bestNode = ns.node
 		}
 	}
 

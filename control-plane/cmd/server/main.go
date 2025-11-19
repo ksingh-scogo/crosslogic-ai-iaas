@@ -99,13 +99,18 @@ func main() {
 	reconciler := orchestrator.NewStateReconciler(db, logger, orch)
 	logger.Info("initialized state reconciler")
 
-	// Initialize Deployment Controller
-	deploymentController := orchestrator.NewDeploymentController(db, logger, orch)
-	logger.Info("initialized deployment controller")
-
-	// Start background services
+	// Start background services context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Initialize API gateway with event bus
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
+	gw.StartHealthMetrics(ctx)
+	logger.Info("initialized API gateway")
+
+	// Initialize Deployment Controller
+	deploymentController := orchestrator.NewDeploymentController(db, logger, orch, gw.LoadBalancer)
+	logger.Info("initialized deployment controller")
 
 	// Start monitor and reconciler
 	monitor.Start(ctx)
@@ -120,11 +125,6 @@ func main() {
 		logger.Fatal("failed to start notification service", zap.Error(err))
 	}
 	logger.Info("started notification service")
-
-	// Initialize API gateway with event bus
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
-	gw.StartHealthMetrics(ctx)
-	logger.Info("initialized API gateway")
 
 	// Create HTTP server
 	server := &http.Server{
