@@ -584,6 +584,30 @@ Comprehensive documentation is available in the `docs/` directory:
 - [Monitoring & Observability](docs/monitoring.md)
 - [Security Best Practices](docs/security.md)
 
+## 🧪 Testing
+
+### Local Testing
+
+To run tests locally, ensure you have Go installed and the database running:
+
+```bash
+# Start dependencies
+docker-compose up -d postgres redis
+
+# Run tests
+cd control-plane
+go test ./...
+```
+
+### Docker Testing
+
+To run tests in a consistent Docker environment:
+
+```bash
+./tests/docker-test-runner.sh
+```
+
+
 ## 🛠️ Development
 
 ### Prerequisites
