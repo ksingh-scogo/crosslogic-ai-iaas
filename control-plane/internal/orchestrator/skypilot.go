@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -54,6 +55,9 @@ type SkyPilotOrchestrator struct {
 
 	// logger provides structured logging for observability
 	logger *zap.Logger
+
+	// eventBus for publishing node events
+	eventBus *events.Bus
 
 	// controlPlaneURL is the HTTPS endpoint for node agent registration
 	controlPlaneURL string
@@ -241,7 +245,7 @@ run: |
 //	    logger,
 //	    "https://api.crosslogic.ai",
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
@@ -252,6 +256,7 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		taskTemplate:    tmpl,
 		db:              db,
 		logger:          logger,
+		eventBus:        eventBus,
 		controlPlaneURL: controlPlaneURL,
 		vllmVersion:     vllmVersion,
 		torchVersion:    torchVersion,
@@ -353,6 +358,33 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 		zap.Duration("launch_duration", launchDuration),
 		zap.String("node_id", config.NodeID),
 	)
+
+	// Publish node launched event
+	if o.eventBus != nil {
+		evt := events.NewEvent(
+			events.EventNodeLaunched,
+			"", // No tenant ID for system events
+			map[string]interface{}{
+				"node_id":          config.NodeID,
+				"cluster_name":     clusterName,
+				"provider":         config.Provider,
+				"region":           config.Region,
+				"instance_type":    config.InstanceType,
+				"gpu_type":         config.GPU,
+				"gpu_count":        config.AcceleratorCount,
+				"spot_instance":    config.UseSpot,
+				"spot_price":       config.SpotBidPrice,
+				"model":            config.Model,
+				"launch_duration":  launchDuration.String(),
+			},
+		)
+		if err := o.eventBus.Publish(ctx, evt); err != nil {
+			o.logger.Error("failed to publish node launched event",
+				zap.Error(err),
+				zap.String("node_id", config.NodeID),
+			)
+		}
+	}
 
 	// Register node in database
 	if err := o.registerNode(ctx, config, clusterName); err != nil {

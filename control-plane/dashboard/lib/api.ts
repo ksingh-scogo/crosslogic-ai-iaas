@@ -205,4 +205,17 @@ export async function terminateNode(clusterName: string): Promise<void> {
   });
 }
 
-export type { UsageHourly, Node, ApiKey, UsagePoint, NodeSummary, CreateApiKeyResponse, LaunchNodeRequest, LaunchNodeResponse };
+type ResolveTenantResponse = {
+  id: string;
+  status: string;
+  new: boolean;
+};
+
+export async function resolveTenant(email: string, name: string): Promise<ResolveTenantResponse> {
+  return await adminFetch<ResolveTenantResponse>("/admin/tenants/resolve", {
+    method: "POST",
+    body: JSON.stringify({ email, name })
+  });
+}
+
+export type { UsageHourly, Node, ApiKey, UsagePoint, NodeSummary, CreateApiKeyResponse, LaunchNodeRequest, LaunchNodeResponse, ResolveTenantResponse };

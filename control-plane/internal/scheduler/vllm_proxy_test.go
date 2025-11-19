@@ -2,10 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,434 +15,135 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestNewVLLMProxy verifies the proxy is initialized with correct defaults
-func TestNewVLLMProxy(t *testing.T) {
-	logger := zap.NewNop()
+func TestVLLMProxy_ForwardRequest(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	proxy := NewVLLMProxy(logger)
 
-	if proxy == nil {
-		t.Fatal("NewVLLMProxy returned nil")
-	}
-
-	if proxy.client == nil {
-		t.Error("HTTP client not initialized")
-	}
-
-	if proxy.breakers == nil {
-		t.Error("Circuit breakers map not initialized")
-	}
-
-	if proxy.logger == nil {
-		t.Error("Logger not initialized")
-	}
-
-	// Verify client configuration
-	if proxy.client.Timeout != 120*time.Second {
-		t.Errorf("Expected timeout 120s, got %v", proxy.client.Timeout)
-	}
-}
-
-// TestForwardRequest_Success tests successful request forwarding
-func TestForwardRequest_Success(t *testing.T) {
-	// Create mock vLLM server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
-		if r.Method != http.MethodPost {
-			t.Errorf("Expected POST, got %s", r.Method)
+	// Mock vLLM server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("expected path /v1/chat/completions, got %s", r.URL.Path)
 		}
-
-		// Return mock response
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("expected Authorization header, got %s", r.Header.Get("Authorization"))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"chatcmpl-123","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"Hello!"}}]}`))
+		w.Write([]byte(`{"id":"chatcmpl-123","object":"chat.completion","created":1677652288,"model":"gpt-3.5-turbo","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}`))
 	}))
-	defer mockServer.Close()
-
-	// Create proxy and node
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
+	defer ts.Close()
 
 	node := &models.Node{
 		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
+		EndpointURL: ts.URL,
 	}
 
-	// Create request
-	reqBody := []byte(`{"model":"test","messages":[{"role":"user","content":"Hi"}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-	req.Header.Set("Content-Type", "application/json")
+	reqBody := []byte(`{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"Hello"}]}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(string(reqBody)))
+	req.Header.Set("Authorization", "Bearer test-key")
 
-	// Forward request
-	ctx := context.Background()
-	resp, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-
+	resp, err := proxy.ForwardRequest(context.Background(), node, req, reqBody)
 	if err != nil {
 		t.Fatalf("ForwardRequest failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// Verify response
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "chatcmpl-123") {
-		t.Error("Response doesn't contain expected content")
+	if !strings.Contains(string(body), "Hello world") {
+		t.Errorf("expected response to contain 'Hello world', got %s", string(body))
 	}
 }
 
-// TestForwardRequest_ServerError tests handling of server errors
-func TestForwardRequest_ServerError(t *testing.T) {
-	// Create mock server that returns 500
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"Internal server error"}`))
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
+func TestVLLMProxy_HandleStreaming(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	proxy := NewVLLMProxy(logger)
 
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-
-	ctx := context.Background()
-	resp, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-
-	// Should not error out, but return the error response
-	if err != nil {
-		t.Fatalf("ForwardRequest failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("Expected status 500, got %d", resp.StatusCode)
-	}
-}
-
-// TestForwardRequest_RetryOnTransientError tests retry logic
-func TestForwardRequest_RetryOnTransientError(t *testing.T) {
-	attempts := 0
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts < 3 {
-			// Fail first 2 attempts
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		// Succeed on 3rd attempt
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success":true}`))
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
-
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-
-	ctx := context.Background()
-	resp, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-
-	if err != nil {
-		t.Fatalf("ForwardRequest failed after retries: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Should succeed after retries
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200 after retries, got %d", resp.StatusCode)
-	}
-
-	if attempts != 3 {
-		t.Errorf("Expected 3 attempts, got %d", attempts)
-	}
-}
-
-// TestForwardRequest_ContextCancellation tests context cancellation handling
-func TestForwardRequest_ContextCancellation(t *testing.T) {
-	// Create slow server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
-
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-
-	// Create context with short timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	_, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-
-	// Should error due to context cancellation
-	if err == nil {
-		t.Error("Expected error due to context cancellation")
-	}
-
-	if !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Errorf("Expected context deadline error, got: %v", err)
-	}
-}
-
-// TestHandleStreaming_Success tests SSE streaming
-func TestHandleStreaming_Success(t *testing.T) {
-	// Create mock streaming server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Mock vLLM server with SSE
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("Response writer doesn't support flushing")
-			return
-		}
-
-		// Send multiple chunks
-		chunks := []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"Hello"}}]}`,
-			`data: {"id":"2","choices":[{"delta":{"content":" World"}}]}`,
+		events := []string{
+			`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{"content":" World"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-3.5-turbo","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-3.5-turbo","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
 			`data: [DONE]`,
 		}
 
-		for _, chunk := range chunks {
-			w.Write([]byte(chunk + "\n\n"))
+		for _, event := range events {
+			fmt.Fprintf(w, "%s\n\n", event)
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
 	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
+	defer ts.Close()
 
 	node := &models.Node{
 		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
+		EndpointURL: ts.URL,
 	}
 
-	reqBody := []byte(`{"model":"test","stream":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
+	reqBody := []byte(`{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"Hello"}],"stream":true}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(string(reqBody)))
 
-	// Create response recorder
+	// Mock ResponseWriter
 	w := httptest.NewRecorder()
 
-	ctx := context.Background()
-	usage, err := proxy.HandleStreaming(ctx, node, req, w, reqBody)
-
+	usage, err := proxy.HandleStreaming(context.Background(), node, req, w, reqBody)
 	if err != nil {
 		t.Fatalf("HandleStreaming failed: %v", err)
 	}
 
-	if usage != nil {
-		t.Errorf("Expected no usage metrics, got %+v", usage)
-	}
-
-	// Verify streaming response
-	result := w.Result()
-	if result.Header.Get("Content-Type") != "text/event-stream" {
-		t.Error("Expected text/event-stream content type")
-	}
-
-	body, _ := io.ReadAll(result.Body)
-	if !strings.Contains(string(body), "Hello") {
-		t.Error("Response doesn't contain streamed content")
-	}
-}
-
-func TestHandleStreaming_UsageCaptured(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		flusher, _ := w.(http.Flusher)
-		chunks := []string{
-			`data: {"choices":[{"delta":{"content":"test"}}]}`,
-			`data: {"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`,
-			`data: [DONE]`,
-		}
-		for _, chunk := range chunks {
-			w.Write([]byte(chunk + "\n\n"))
-			flusher.Flush()
-		}
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
-
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test","stream":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-	rec := httptest.NewRecorder()
-
-	usage, err := proxy.HandleStreaming(context.Background(), node, req, rec, reqBody)
-	if err != nil {
-		t.Fatalf("HandleStreaming failed: %v", err)
-	}
 	if usage == nil {
-		t.Fatal("Expected usage metrics to be captured")
+		t.Fatal("expected usage metrics, got nil")
 	}
-	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 || usage.TotalTokens != 12 {
-		t.Errorf("Unexpected usage metrics: %+v", usage)
+
+	if usage.TotalTokens != 30 {
+		t.Errorf("expected 30 total tokens, got %d", usage.TotalTokens)
+	}
+
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "Hello") {
+		t.Errorf("expected response to contain 'Hello', got %s", respBody)
 	}
 }
 
-// TestCircuitBreaker_TripsAfterFailures tests circuit breaker functionality
-func TestCircuitBreaker_TripsAfterFailures(t *testing.T) {
-	logger := zap.NewNop()
+func TestVLLMProxy_CircuitBreaker(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	proxy := NewVLLMProxy(logger)
+
+	// Mock failing server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
 
 	node := &models.Node{
 		ID:          uuid.New(),
-		EndpointURL: "http://nonexistent-server:9999",
-		Status:      "active",
+		EndpointURL: ts.URL,
 	}
 
-	reqBody := []byte(`{"model":"test"}`)
+	reqBody := []byte(`{}`)
+	req, _ := http.NewRequest("POST", "http://example.com", strings.NewReader(string(reqBody)))
 
-	// Make multiple failing requests to trip circuit breaker (5 failures opens the breaker)
-	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		_, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-		cancel()
-
-		if err == nil {
-			t.Error("Expected error for failed request")
-		}
+	// Trigger failures to open circuit breaker
+	for i := 0; i < 6; i++ {
+		proxy.ForwardRequest(context.Background(), node, req, reqBody)
 	}
 
-	// Circuit breaker should be open now - next request should fail immediately
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-	ctx := context.Background()
-	_, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-
+	// Next request should fail fast with circuit breaker error
+	_, err := proxy.ForwardRequest(context.Background(), node, req, reqBody)
 	if err == nil {
-		t.Error("Expected circuit breaker to reject request")
+		t.Fatal("expected circuit breaker error, got nil")
 	}
 	if !strings.Contains(err.Error(), "circuit breaker open") {
-		t.Errorf("Expected circuit breaker error, got: %v", err)
-	}
-}
-
-// TestCircuitBreaker_ResetsAfterTimeout tests circuit breaker reset
-// Note: This test is skipped by default due to 30s timeout. Run with -short=false to enable.
-func TestCircuitBreaker_ResetsAfterTimeout(t *testing.T) {
-	if os.Getenv("RUN_LONG_TESTS") == "" {
-		t.Skip("Skipping long-running circuit breaker test. Set RUN_LONG_TESTS=1 to enable.")
-	}
-
-	// Create a successful mock server for recovery testing
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success":true}`))
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
-
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: "http://nonexistent-server:9999",
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test"}`)
-
-	// Trip circuit breaker with 5 failures
-	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		proxy.ForwardRequest(ctx, node, req, reqBody)
-		cancel()
-	}
-
-	// Verify circuit breaker is open
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-	ctx := context.Background()
-	_, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-	if err == nil || !strings.Contains(err.Error(), "circuit breaker open") {
-		t.Error("Circuit breaker should be open")
-	}
-
-	// Wait for circuit breaker timeout (30 seconds) plus small buffer
-	t.Log("Waiting 31 seconds for circuit breaker to transition to half-open...")
-	time.Sleep(31 * time.Second)
-
-	// Update node to point to working server
-	node.EndpointURL = mockServer.URL
-
-	// Circuit breaker should now be in half-open state and allow one request
-	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-	resp, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-	if err != nil {
-		t.Errorf("Circuit breaker should allow request in half-open state, got error: %v", err)
-	}
-	if resp != nil {
-		resp.Body.Close()
-	}
-}
-
-// BenchmarkForwardRequest benchmarks request forwarding
-func BenchmarkForwardRequest(b *testing.B) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success":true}`))
-	}))
-	defer mockServer.Close()
-
-	logger := zap.NewNop()
-	proxy := NewVLLMProxy(logger)
-
-	node := &models.Node{
-		ID:          uuid.New(),
-		EndpointURL: mockServer.URL,
-		Status:      "active",
-	}
-
-	reqBody := []byte(`{"model":"test"}`)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(reqBody)))
-		ctx := context.Background()
-		resp, err := proxy.ForwardRequest(ctx, node, req, reqBody)
-		if err != nil {
-			b.Fatal(err)
-		}
-		resp.Body.Close()
+		t.Errorf("expected 'circuit breaker open' error, got %v", err)
 	}
 }

@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: control-plane
-          image: crosslogic/control-plane:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/crosslogic/crosslogic-ai-iaas/control-plane:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           envFrom:
@@ -58,4 +58,3 @@ spec:
       targetPort: 8080
   selector:
     app: control-plane
-

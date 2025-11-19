@@ -2,6 +2,7 @@ import type { NextAuthOptions } from "next-auth";
 import EmailProvider from "next-auth/providers/email";
 import GoogleProvider from "next-auth/providers/google";
 import CredentialsProvider from "next-auth/providers/credentials";
+import { resolveTenant } from "./api";
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -44,7 +45,19 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
-        token.tenantId = (user as any).tenantId;
+        // If user has a tenantId (from Credentials provider), use it
+        if ((user as any).tenantId) {
+          token.tenantId = (user as any).tenantId;
+        } else if (user.email) {
+          // Otherwise, resolve tenant from backend
+          try {
+            const tenant = await resolveTenant(user.email, user.name || "User");
+            token.tenantId = tenant.id;
+          } catch (err) {
+            console.error("Failed to resolve tenant", err);
+            // Fallback for now, or handle error appropriately
+          }
+        }
       }
       return token;
     },
