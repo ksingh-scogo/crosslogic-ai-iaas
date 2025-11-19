@@ -383,3 +383,20 @@ CREATE TRIGGER update_reservations_updated_at BEFORE UPDATE ON reservations
 
 CREATE TRIGGER update_credits_updated_at BEFORE UPDATE ON credits
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================================
+-- WEBHOOK EVENTS TABLE (for idempotency and audit trail)
+-- ============================================================================
+
+CREATE TABLE webhook_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id VARCHAR(255) NOT NULL UNIQUE,
+    event_type VARCHAR(100) NOT NULL,
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    payload JSONB,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_webhook_events_event_id ON webhook_events(event_id);
+CREATE INDEX idx_webhook_events_event_type ON webhook_events(event_type);
+CREATE INDEX idx_webhook_events_processed_at ON webhook_events(processed_at DESC);

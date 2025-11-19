@@ -12,9 +12,11 @@ import (
 	"github.com/crosslogic/control-plane/internal/billing"
 	"github.com/crosslogic/control-plane/internal/config"
 	"github.com/crosslogic/control-plane/internal/gateway"
-	"github.com/crosslogic/control-plane/internal/scheduler"
+	"github.com/crosslogic/control-plane/internal/notifications"
+	"github.com/crosslogic/control-plane/internal/orchestrator"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"go.uber.org/zap"
 )
 
@@ -50,21 +52,60 @@ func main() {
 	defer redisCache.Close()
 	logger.Info("connected to Redis")
 
-	// Initialize scheduler
-	sched := scheduler.NewScheduler(db, logger)
-	logger.Info("initialized scheduler")
+	// Initialize event bus
+	eventBus := events.NewBus(logger)
+	logger.Info("initialized event bus")
+
+	// Initialize notification service
+	notificationConfig, err := notifications.LoadConfig()
+	if err != nil {
+		logger.Fatal("failed to load notification config", zap.Error(err))
+	}
+
+	notificationService, err := notifications.NewService(notificationConfig, db, redisCache, logger, eventBus)
+	if err != nil {
+		logger.Fatal("failed to initialize notification service", zap.Error(err))
+	}
+	logger.Info("initialized notification service")
 
 	// Initialize billing engine
 	billingEngine := billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
 	logger.Info("initialized billing engine")
 
-	// Start billing background jobs
+	// Initialize webhook handler with event bus
+	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger, eventBus)
+	logger.Info("initialized webhook handler")
+
+	// Initialize SkyPilot orchestrator with event bus
+	orch, err := orchestrator.NewSkyPilotOrchestrator(
+		db,
+		logger,
+		cfg.Server.ControlPlaneURL,
+		cfg.Runtime.VLLMVersion,
+		cfg.Runtime.TorchVersion,
+		eventBus,
+	)
+	if err != nil {
+		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
+	}
+	logger.Info("initialized SkyPilot orchestrator")
+
+	// Start background services
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start billing background jobs
 	billingEngine.StartBackgroundJobs(ctx)
 
-	// Initialize API gateway
-	gw := gateway.NewGateway(db, redisCache, logger)
+	// Start notification service
+	if err := notificationService.Start(ctx); err != nil {
+		logger.Fatal("failed to start notification service", zap.Error(err))
+	}
+	logger.Info("started notification service")
+
+	// Initialize API gateway with event bus
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, cfg.Security.AdminAPIToken, eventBus)
+	gw.StartHealthMetrics(ctx)
 	logger.Info("initialized API gateway")
 
 	// Create HTTP server
@@ -96,6 +137,11 @@ func main() {
 	// Graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
+
+	// Stop notification service
+	if err := notificationService.Stop(shutdownCtx); err != nil {
+		logger.Error("failed to stop notification service gracefully", zap.Error(err))
+	}
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server forced to shutdown", zap.Error(err))
