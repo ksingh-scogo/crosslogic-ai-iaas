@@ -72,6 +72,10 @@ func main() {
 	billingEngine := billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
 	logger.Info("initialized billing engine")
 
+	// Initialize cost tracker for per-tenant cost aggregation
+	costTracker := billing.NewCostTracker(db, logger)
+	logger.Info("initialized cost tracker")
+
 	// Initialize webhook handler with event bus
 	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger, eventBus)
 	logger.Info("initialized webhook handler")
@@ -106,19 +110,34 @@ func main() {
 	// Initialize API gateway with event bus
 	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
 	gw.StartHealthMetrics(ctx)
-	logger.Info("initialized API gateway")
+
+	// Start queue depth monitoring for intelligent load balancing
+	gw.LoadBalancer.StartQueueMonitoring(ctx)
+	logger.Info("initialized API gateway with queue monitoring")
 
 	// Initialize Deployment Controller
 	deploymentController := orchestrator.NewDeploymentController(db, logger, orch, gw.LoadBalancer)
 	logger.Info("initialized deployment controller")
+
+	// Initialize Model Cache Warmer for JuiceFS optimization
+	cacheWarmer := orchestrator.NewModelCacheWarmer(db, logger, orch)
+	logger.Info("initialized model cache warmer")
 
 	// Start monitor and reconciler
 	monitor.Start(ctx)
 	reconciler.Start(ctx)
 	deploymentController.Start(ctx)
 
+	// Start predictive cache warming
+	cacheWarmer.Start(ctx)
+	logger.Info("started predictive cache warming")
+
 	// Start billing background jobs
 	billingEngine.StartBackgroundJobs(ctx)
+
+	// Start cost tracker aggregation loop
+	costTracker.Start(ctx)
+	logger.Info("started cost tracker")
 
 	// Start notification service
 	if err := notificationService.Start(ctx); err != nil {
