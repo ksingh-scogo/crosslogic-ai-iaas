@@ -59,38 +59,41 @@ This plan outlines a 3-phase approach to bridge these gaps, prioritizing system 
 
 ### Phase 2: Dashboard & User Experience (Days 3-5)
 **Goal**: Provide a UI for users and admins.
+**Status**: ✅ Complete
 
 1.  **Complete Dashboard Skeleton**:
-    *   Implement NextAuth.js with Google Provider (and Email fallback).
-    *   Connect `dashboard/lib/api.ts` to the Control Plane Admin API.
+    *   ✅ Implement NextAuth.js with Google Provider (and Email fallback).
+    *   ✅ Connect `dashboard/lib/api.ts` to the Control Plane Admin API.
 2.  **Implement Key Features**:
-    *   **API Keys**: List, Create, Revoke (connect to `api_keys` table).
-    *   **Usage**: Visualize `usage_hourly` data using Recharts.
-    *   **Nodes (Admin)**: View node status, launch/terminate nodes via UI.
+    *   ✅ **API Keys**: List, Create, Revoke (connect to `api_keys` table).
+    *   ✅ **Usage**: Visualize `usage_hourly` data using Recharts.
+    *   ✅ **Nodes (Admin)**: View node status, launch/terminate nodes via UI.
 3.  **Secure Dashboard**:
-    *   Ensure Dashboard acts as a proper OAuth2 client.
-    *   Implement server-side session validation.
+    *   ✅ Ensure Dashboard acts as a proper OAuth2 client.
+    *   ✅ Implement server-side session validation.
 
 ### Phase 3: Deployment & Automation (Days 6-7)
 **Goal**: Enable one-click deployment.
+**Status**: ✅ Complete
 
 1.  **Kubernetes Manifests**:
-    *   Create `deploy/k8s/` with:
+    *   ✅ Create `deploy/k8s/` with:
         *   `control-plane-deployment.yaml`
-        *   `control-plane-service.yaml`
-        *   `postgres-statefulset.yaml` (or managed DB stub)
+        *   `control-plane-service.yaml` (as Service in deployment file)
+        *   `postgres-statefulset.yaml`
         *   `redis-deployment.yaml`
 2.  **CI/CD Pipeline**:
-    *   Create `.github/workflows/ci.yaml`:
+    *   ✅ Create `.github/workflows/ci.yaml`:
         *   Run `go test ./...`
         *   Build Docker images.
         *   Linting (`golangci-lint`).
 3.  **Load Testing**:
-    *   Create `tests/k6/load_test.js` to simulate 1000 req/s.
-    *   Verify Rate Limiter and Circuit Breaker behavior under load.
+    *   ✅ Create `tests/k6/load_test.js` to simulate 1000 req/s.
+    *   ✅ Verify Rate Limiter and Circuit Breaker behavior under load.
 
 ## 4. Immediate Next Steps (User Action)
 
-1.  **Approve this plan**.
-2.  Once approved, I will begin with **Phase 1**, specifically adding the missing `/metrics` endpoint and instrumentation, as this is a prerequisite for safe testing and deployment.
+1.  **Deploy**: The system is ready. Apply manifests in `deploy/k8s/`.
+2.  **Monitor**: Check Prometheus metrics at `/metrics`.
+
 

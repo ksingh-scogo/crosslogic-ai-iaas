@@ -11,6 +11,7 @@ import (
 
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v76"
 	"github.com/stripe/stripe-go/v76/webhook"
@@ -58,6 +59,9 @@ type WebhookHandler struct {
 	// cache provides distributed idempotency tracking
 	cache *cache.Cache
 
+	// eventBus for publishing payment events
+	eventBus *events.Bus
+
 	// processedEvents tracks processed webhook IDs to ensure idempotency.
 	// In production, this should be backed by a distributed cache (Redis) or database table.
 	processedEvents map[string]time.Time
@@ -93,11 +97,12 @@ type webhookEvent struct {
 //	    logger,
 //	)
 //	http.HandleFunc("/api/webhooks/stripe", handler.HandleWebhook)
-func NewWebhookHandler(webhookSecret string, db *database.Database, cacheClient *cache.Cache, logger *zap.Logger) *WebhookHandler {
+func NewWebhookHandler(webhookSecret string, db *database.Database, cacheClient *cache.Cache, logger *zap.Logger, eventBus *events.Bus) *WebhookHandler {
 	return &WebhookHandler{
 		webhookSecret:   webhookSecret,
 		db:              db,
 		cache:           cacheClient,
+		eventBus:        eventBus,
 		logger:          logger,
 		processedEvents: make(map[string]time.Time),
 	}
@@ -294,6 +299,29 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 		zap.Int64("amount", paymentIntent.Amount),
 		zap.String("currency", string(paymentIntent.Currency)),
 	)
+
+	// Publish payment succeeded event
+	if h.eventBus != nil {
+		evt := events.NewEvent(
+			events.EventPaymentSucceeded,
+			tenantID.String(),
+			map[string]interface{}{
+				"tenant_id":         tenantID.String(),
+				"tenant_name":       tenantName,
+				"amount":            paymentIntent.Amount,
+				"currency":          string(paymentIntent.Currency),
+				"amount_formatted":  fmt.Sprintf("$%.2f", float64(paymentIntent.Amount)/100),
+				"payment_method":    paymentIntent.PaymentMethod,
+				"stripe_payment_id": paymentIntent.ID,
+			},
+		)
+		if err := h.eventBus.Publish(ctx, evt); err != nil {
+			h.logger.Error("failed to publish payment succeeded event",
+				zap.Error(err),
+				zap.String("payment_id", paymentIntent.ID),
+			)
+		}
+	}
 
 	return nil
 }
@@ -583,6 +611,10 @@ func (h *WebhookHandler) handleInvoicePaymentSucceeded(ctx context.Context, even
 // - Monitor storage growth
 // - Use compressed payload storage for large events
 func (h *WebhookHandler) markEventProcessed(ctx context.Context, event stripe.Event, payload []byte) error {
+	if h.db == nil {
+		return nil // Skip persistence if DB is not configured (e.g. testing)
+	}
+
 	// Persist to database for audit trail
 	query := `
 		INSERT INTO webhook_events (

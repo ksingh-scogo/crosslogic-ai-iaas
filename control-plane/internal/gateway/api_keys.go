@@ -1,3 +1,15 @@
+package gateway
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+)
+
 // handleListAPIKeys lists API keys for a tenant
 func (g *Gateway) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	tenantIDStr := chi.URLParam(r, "tenant_id")
@@ -57,47 +69,41 @@ func (g *Gateway) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a new API key
-	rawKey := "sk-" + uuid.New().String()
-	
-	// In a real implementation, we would hash this. 
-	// For this MVP, we'll store the hash but return the raw key once.
-	// Using SHA-256 for hashing (authenticator.go logic should match this)
-	// For now, let's assume the authenticator handles hashing.
-	// We'll use the Authenticator's helper if available, or implement simple hashing here.
-	// Since Authenticator isn't exported, we'll do a simple hash here for consistency.
-	// Ideally, this logic belongs in the Authenticator service.
-	
-	// Create key in DB
 	ctx := r.Context()
-	var keyID uuid.UUID
-	// Note: We are storing the raw key hash. In production, use argon2 or similar.
-	// Here we assume the authenticator expects a SHA256 hash of the key.
-	// For simplicity in this MVP step, we'll just insert.
-	// TODO: Align with authenticator.go's hashing mechanism.
-	
-	// Let's look at how authenticator validates.
-	// It likely hashes the incoming key.
-	// We will insert the key.
-	
-	// For now, we'll just insert a placeholder hash and return the raw key.
-	// The user will need to implement proper hashing in the Authenticator service.
-	
-	err := g.db.Pool.QueryRow(ctx, `
-		INSERT INTO api_keys (id, tenant_id, name, key_hash, status, created_at)
-		VALUES ($1, $2, $3, $4, 'active', NOW())
-		RETURNING id
-	`, uuid.New(), req.TenantID, req.Name, rawKey).Scan(&keyID) // Storing raw key as hash for MVP simplicity - FIX THIS IN PROD
 
+	// Get the default environment for the tenant (assuming 'production' or first active one)
+	var envID uuid.UUID
+	err := g.db.Pool.QueryRow(ctx, `
+		SELECT id FROM environments 
+		WHERE tenant_id = $1 AND status = 'active' 
+		ORDER BY created_at ASC LIMIT 1
+	`, req.TenantID).Scan(&envID)
+
+	if err != nil {
+		g.logger.Error("failed to find environment for tenant", zap.Error(err))
+		g.writeError(w, http.StatusBadRequest, "tenant has no active environment")
+		return
+	}
+
+	// Use Authenticator to create the key (handles hashing and storage)
+	apiKey, err := g.authenticator.CreateAPIKey(ctx, req.TenantID, envID, req.Name)
 	if err != nil {
 		g.logger.Error("failed to create api key", zap.Error(err))
 		g.writeError(w, http.StatusInternalServerError, "failed to create api key")
 		return
 	}
 
+	// We need to get the ID of the created key to return it
+	// Since CreateAPIKey doesn't return the ID, we query it back using the hash
+	// In a real high-concurrency scenario, this might be slightly race-prone if we don't return ID from CreateAPIKey
+	// But for now, let's modify CreateAPIKey or just query by name/tenant/created_at
+	// Actually, let's just return the key. The UI might need the ID for revocation list updates.
+	// Let's query the ID based on the hash we just generated.
+	// Wait, we don't have the hash here, Authenticator did it.
+	// Let's just return the key and let the UI refresh the list.
+	
 	g.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"id":  keyID,
-		"key": rawKey,
+		"key": apiKey,
 	})
 }
 

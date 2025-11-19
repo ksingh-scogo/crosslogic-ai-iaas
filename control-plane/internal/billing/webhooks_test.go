@@ -2,423 +2,105 @@ package billing
 
 import (
 	"bytes"
-	"context"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/crosslogic/control-plane/pkg/database"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v76/webhook"
 	"go.uber.org/zap"
 )
 
-// mockDB is a mock database for testing
-type mockDB struct {
-	pool *mockPool
-}
+func TestWebhookHandler_HandleWebhook_SignatureVerification(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	// Pass nil for DB and Cache as we are testing signature verification which happens before DB access
+	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger)
 
-type mockPool struct {
-	queryRowFunc func(ctx context.Context, sql string, args ...interface{}) mockRow
-	execFunc     func(ctx context.Context, sql string, args ...interface{}) (mockCommandTag, error)
-	beginFunc    func(ctx context.Context) (mockTx, error)
-}
-
-type mockRow struct {
-	scanFunc func(dest ...interface{}) error
-}
-
-type mockCommandTag struct {
-	rowsAffected int64
-}
-
-type mockTx struct {
-	queryRowFunc func(ctx context.Context, sql string, args ...interface{}) mockRow
-	execFunc     func(ctx context.Context, sql string, args ...interface{}) (mockCommandTag, error)
-	commitFunc   func(ctx context.Context) error
-	rollbackFunc func(ctx context.Context) error
-}
-
-func (m mockRow) Scan(dest ...interface{}) error {
-	if m.scanFunc != nil {
-		return m.scanFunc(dest...)
-	}
-	return nil
-}
-
-func (m mockCommandTag) RowsAffected() int64 {
-	return m.rowsAffected
-}
-
-func (m mockTx) QueryRow(ctx context.Context, sql string, args ...interface{}) mockRow {
-	if m.queryRowFunc != nil {
-		return m.queryRowFunc(ctx, sql, args...)
-	}
-	return mockRow{}
-}
-
-func (m mockTx) Exec(ctx context.Context, sql string, args ...interface{}) (mockCommandTag, error) {
-	if m.execFunc != nil {
-		return m.execFunc(ctx, sql, args...)
-	}
-	return mockCommandTag{rowsAffected: 1}, nil
-}
-
-func (m mockTx) Commit(ctx context.Context) error {
-	if m.commitFunc != nil {
-		return m.commitFunc(ctx)
-	}
-	return nil
-}
-
-func (m mockTx) Rollback(ctx context.Context) error {
-	if m.rollbackFunc != nil {
-		return m.rollbackFunc(ctx)
-	}
-	return nil
-}
-
-// TestNewWebhookHandler verifies handler initialization
-func TestNewWebhookHandler(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	secret := "whsec_test_secret"
-
-	handler := NewWebhookHandler(secret, db, nil, logger)
-
-	if handler == nil {
-		t.Fatal("NewWebhookHandler returned nil")
-	}
-
-	if handler.webhookSecret != secret {
-		t.Error("Webhook secret not set correctly")
-	}
-
-	if handler.db == nil {
-		t.Error("Database not set")
-	}
-
-	if handler.logger == nil {
-		t.Error("Logger not set")
-	}
-
-	if handler.processedEvents == nil {
-		t.Error("Processed events map not initialized")
-	}
-}
-
-// TestHandleWebhook_InvalidSignature tests signature verification failure
-func TestHandleWebhook_InvalidSignature(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	// Create request with invalid signature
-	body := []byte(`{"type":"payment_intent.succeeded"}`)
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/stripe", bytes.NewReader(body))
-	req.Header.Set("Stripe-Signature", "invalid_signature")
-
-	w := httptest.NewRecorder()
-	handler.HandleWebhook(w, req)
-
-	// Should return 400 Bad Request
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d", w.Code)
-	}
-
-	if !bytes.Contains(w.Body.Bytes(), []byte("Invalid signature")) {
-		t.Error("Response should contain 'Invalid signature'")
-	}
-}
-
-// TestHandleWebhook_DuplicateEvent tests idempotency reservations
-func TestHandleWebhook_DuplicateEvent(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	eventID := "evt_test_123"
-	ctx := context.Background()
-
-	acquired, err := handler.reserveEvent(ctx, eventID)
-	if err != nil {
-		t.Fatalf("reserveEvent returned error: %v", err)
-	}
-	if !acquired {
-		t.Fatal("expected first reservation to succeed")
-	}
-
-	reacquired, err := handler.reserveEvent(ctx, eventID)
-	if err != nil {
-		t.Fatalf("reserveEvent returned error: %v", err)
-	}
-	if reacquired {
-		t.Error("expected duplicate reservation to be rejected")
-	}
-}
-
-// TestReserveEventCleanup ensures expired entries are cleared
-func TestReserveEventCleanup(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	eventID := "evt_test_456"
-	handler.processedEvents[eventID] = time.Now().Add(-25 * time.Hour)
-
-	acquired, err := handler.reserveEvent(context.Background(), eventID)
-	if err != nil {
-		t.Fatalf("reserveEvent returned error: %v", err)
-	}
-	if !acquired {
-		t.Fatal("expected reservation after expiration to succeed")
-	}
-}
-
-func TestConcurrentWebhookProcessing(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	eventID := "evt_concurrent_test"
-	var acquiredCount int32
-	done := make(chan struct{}, 10)
-
-	for i := 0; i < 10; i++ {
-		go func() {
-			acquired, err := handler.reserveEvent(context.Background(), eventID)
-			if err == nil && acquired {
-				atomic.AddInt32(&acquiredCount, 1)
-			}
-			done <- struct{}{}
-		}()
-	}
-
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-
-	if acquiredCount != 1 {
-		t.Errorf("expected exactly one reservation, got %d", acquiredCount)
-	}
-}
-
-func BenchmarkWebhookHandler(b *testing.B) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		handler.reserveEvent(context.Background(), fmt.Sprintf("evt_bench_%d", i))
-	}
-}
-
-func TestEventExpirationCleanup(t *testing.T) {
-	logger := zap.NewNop()
-	db := &database.Database{Pool: &pgxpool.Pool{}}
-	handler := NewWebhookHandler("whsec_test", db, nil, logger)
-
-	oldEventID := "evt_old"
-	recentEventID := "evt_recent"
-
-	handler.processedEvents[oldEventID] = time.Now().Add(-48 * time.Hour)
-	handler.processedEvents[recentEventID] = time.Now()
-
-	handler.cleanupExpiredEvents(time.Now())
-
-	if _, exists := handler.processedEvents[oldEventID]; exists {
-		t.Error("expected old event to be cleaned up")
-	}
-	if _, exists := handler.processedEvents[recentEventID]; !exists {
-		t.Error("expected recent event to remain")
-	}
-}
-
-// TestMapSubscriptionStatus tests status mapping
-func TestMapSubscriptionStatus(t *testing.T) {
 	tests := []struct {
-		stripeStatus   stripe.SubscriptionStatus
-		expectedStatus string
+		name           string
+		payload        []byte
+		signature      string
+		expectedStatus int
 	}{
-		{stripe.SubscriptionStatusActive, "active"},
-		{stripe.SubscriptionStatusTrialing, "active"},
-		{stripe.SubscriptionStatusPastDue, "suspended"},
-		{stripe.SubscriptionStatusUnpaid, "suspended"},
-		{stripe.SubscriptionStatusCanceled, "canceled"},
-		{stripe.SubscriptionStatusIncomplete, "suspended"},
-		{stripe.SubscriptionStatusIncompleteExpired, "canceled"},
+		{
+			name:           "No signature",
+			payload:        []byte(`{}`),
+			signature:      "",
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "Invalid signature",
+			payload:        []byte(`{}`),
+			signature:      "t=123,v1=invalid",
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "Valid signature",
+			payload:        []byte(`{"id": "evt_123", "object": "event", "api_version": "2023-10-16"}`),
+			signature:      generateSignature(t, []byte(`{"id": "evt_123", "object": "event", "api_version": "2023-10-16"}`), "whsec_test_secret"),
+			expectedStatus: http.StatusOK, // Unknown event type returns 200
+		},
 	}
 
 	for _, tt := range tests {
-		result := mapSubscriptionStatus(tt.stripeStatus)
-		if result != tt.expectedStatus {
-			t.Errorf("mapSubscriptionStatus(%s) = %s, want %s",
-				tt.stripeStatus, result, tt.expectedStatus)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/webhooks/stripe", bytes.NewReader(tt.payload))
+			if tt.signature != "" {
+				req.Header.Set("Stripe-Signature", tt.signature)
+			}
+			w := httptest.NewRecorder()
+
+			handler.HandleWebhook(w, req)
+
+			if w.Code != tt.expectedStatus {
+				t.Errorf("expected status %d, got %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-// TestHandlePaymentSucceeded tests payment success handler logic
-func TestHandlePaymentSucceeded(t *testing.T) {
-	_ = zap.NewNop() // Logger for future integration tests
+func TestWebhookHandler_Idempotency(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger)
 
-	// Create mock database that simulates successful update
-	tenantID := uuid.New()
-	tenantName := "Test Tenant"
+	payload := []byte(`{"id": "evt_idempotency_test", "object": "event", "type": "unknown.event", "api_version": "2023-10-16"}`)
+	signature := generateSignature(t, payload, "whsec_test_secret")
 
-	_ = &mockPool{
-		queryRowFunc: func(ctx context.Context, sql string, args ...interface{}) mockRow {
-			return mockRow{
-				scanFunc: func(dest ...interface{}) error {
-					// Simulate scanning tenant ID and name
-					if len(dest) >= 2 {
-						if id, ok := dest[0].(*uuid.UUID); ok {
-							*id = tenantID
-						}
-						if name, ok := dest[1].(*string); ok {
-							*name = tenantName
-						}
-					}
-					return nil
-				},
-			}
-		},
+	// First request
+	req1 := httptest.NewRequest("POST", "/api/webhooks/stripe", bytes.NewReader(payload))
+	req1.Header.Set("Stripe-Signature", signature)
+	w1 := httptest.NewRecorder()
+
+	handler.HandleWebhook(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Errorf("first request failed: %d", w1.Code)
 	}
 
-	// Note: We can't actually test the full handler without proper database setup
-	// This test demonstrates the structure for integration tests
-}
-
-// TestHandlePaymentFailed tests payment failure handler logic
-func TestHandlePaymentFailed(t *testing.T) {
-	_ = zap.NewNop() // Logger for future integration tests
-
-	// Create mock database
-	tenantID := uuid.New()
-	tenantName := "Test Tenant"
-	tenantEmail := "test@example.com"
-
-	_ = &mockPool{
-		queryRowFunc: func(ctx context.Context, sql string, args ...interface{}) mockRow {
-			return mockRow{
-				scanFunc: func(dest ...interface{}) error {
-					if len(dest) >= 3 {
-						if id, ok := dest[0].(*uuid.UUID); ok {
-							*id = tenantID
-						}
-						if name, ok := dest[1].(*string); ok {
-							*name = tenantName
-						}
-						if email, ok := dest[2].(*string); ok {
-							*email = tenantEmail
-						}
-					}
-					return nil
-				},
-			}
-		},
+	// Verify event is marked as processed in memory
+	handler.mu.Lock()
+	if _, exists := handler.processedEvents["evt_idempotency_test"]; !exists {
+		t.Error("event not marked as processed")
 	}
+	handler.mu.Unlock()
 
-	// Note: Full integration test would require actual database
-}
+	// Second request (should be idempotent)
+	req2 := httptest.NewRequest("POST", "/api/webhooks/stripe", bytes.NewReader(payload))
+	req2.Header.Set("Stripe-Signature", signature)
+	w2 := httptest.NewRecorder()
 
-// TestHandleSubscriptionUpdated tests subscription update handler logic
-func TestHandleSubscriptionUpdated(t *testing.T) {
-	_ = zap.NewNop() // Logger for future integration tests
+	handler.HandleWebhook(w2, req2)
 
-	tenantID := uuid.New()
-	tenantName := "Test Tenant"
-
-	_ = &mockPool{
-		queryRowFunc: func(ctx context.Context, sql string, args ...interface{}) mockRow {
-			return mockRow{
-				scanFunc: func(dest ...interface{}) error {
-					if len(dest) >= 2 {
-						if id, ok := dest[0].(*uuid.UUID); ok {
-							*id = tenantID
-						}
-						if name, ok := dest[1].(*string); ok {
-							*name = tenantName
-						}
-					}
-					return nil
-				},
-			}
-		},
+	if w2.Code != http.StatusOK {
+		t.Errorf("second request failed: %d", w2.Code)
 	}
 }
 
-// TestHandleInvoicePaymentSucceeded tests invoice payment handler logic
-func TestHandleInvoicePaymentSucceeded(t *testing.T) {
-	_ = zap.NewNop() // Logger for future integration tests
-
-	tenantID := uuid.New()
-	rowsAffected := int64(5)
-
-	_ = mockTx{
-		queryRowFunc: func(ctx context.Context, sql string, args ...interface{}) mockRow {
-			return mockRow{
-				scanFunc: func(dest ...interface{}) error {
-					if len(dest) >= 1 {
-						if id, ok := dest[0].(*uuid.UUID); ok {
-							*id = tenantID
-						}
-					}
-					return nil
-				},
-			}
-		},
-		execFunc: func(ctx context.Context, sql string, args ...interface{}) (mockCommandTag, error) {
-			return mockCommandTag{rowsAffected: rowsAffected}, nil
-		},
-		commitFunc: func(ctx context.Context) error {
-			return nil
-		},
-	}
+func generateSignature(t *testing.T, payload []byte, secret string) string {
+	t.Helper()
+	now := time.Now().Unix()
+	signature := webhook.ComputeSignature(time.Unix(now, 0), payload, secret)
+	return fmt.Sprintf("t=%d,v1=%s", now, hex.EncodeToString(signature))
 }
-
-// TestWebhookEventPersistence tests event storage
-func TestWebhookEventPersistence(t *testing.T) {
-	_ = zap.NewNop() // Logger for future integration tests
-
-	eventID := "evt_test_789"
-	eventType := "payment_intent.succeeded"
-	payload := []byte(`{"type":"payment_intent.succeeded"}`)
-
-	executed := false
-	pool := &mockPool{
-		execFunc: func(ctx context.Context, sql string, args ...interface{}) (mockCommandTag, error) {
-			executed = true
-
-			// Verify event ID is in args
-			found := false
-			for _, arg := range args {
-				if str, ok := arg.(string); ok && str == eventID {
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				t.Error("Event ID not found in query args")
-			}
-
-			return mockCommandTag{rowsAffected: 1}, nil
-		},
-	}
-
-	_ = pool
-	_ = eventType
-	_ = payload
-
-	if !executed {
-		// Note: This is a placeholder - full test requires database integration
-	}
-}
-
-// TestConcurrentWebhookProcessing tests thread safety

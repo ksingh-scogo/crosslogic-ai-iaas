@@ -44,6 +44,14 @@ var (
 		},
 		[]string{"node_id", "error_type"},
 	)
+
+	dependencyUp = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "dependency_up",
+			Help: "Status of dependencies (1 = up, 0 = down)",
+		},
+		[]string{"service"},
+	)
 )
 
 // metricsMiddleware returns a middleware that records HTTP metrics

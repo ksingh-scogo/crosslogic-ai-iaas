@@ -15,9 +15,11 @@ import (
 	"github.com/crosslogic/control-plane/internal/scheduler"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/crosslogic/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -37,10 +39,11 @@ type Gateway struct {
 	webhookHandler *billing.WebhookHandler
 	orchestrator   *orchestrator.SkyPilotOrchestrator
 	adminToken     string
+	eventBus       *events.Bus
 }
 
 // NewGateway creates a new API gateway
-func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, adminToken string) *Gateway {
+func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, adminToken string, eventBus *events.Bus) *Gateway {
 	g := &Gateway{
 		db:             db,
 		cache:          cache,
@@ -53,6 +56,7 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 		webhookHandler: webhookHandler,
 		orchestrator:   orch,
 		adminToken:     adminToken,
+		eventBus:       eventBus,
 	}
 
 	g.setupRoutes()
@@ -68,6 +72,16 @@ func (g *Gateway) setupRoutes() {
 	g.router.Use(g.metricsMiddleware) // Add metrics middleware
 	g.router.Use(middleware.Recoverer)
 	g.router.Use(middleware.Timeout(60 * time.Second))
+
+	// CORS
+	g.router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000", "https://*.crosslogic.ai"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Admin-Token"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: true,
+		MaxAge:           300, // Maximum value not ignored by any of major browsers
+	}))
 
 	// Metrics endpoint
 	g.registerMetrics()
@@ -116,8 +130,42 @@ func (g *Gateway) setupRoutes() {
 
 		// Tenant management
 		r.Post("/admin/tenants", g.handleCreateTenant)
+		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
 		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
 	})
+}
+
+// StartHealthMetrics starts a background goroutine to update dependency health metrics
+func (g *Gateway) StartHealthMetrics(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				g.updateHealthMetrics(ctx)
+			}
+		}
+	}()
+}
+
+func (g *Gateway) updateHealthMetrics(ctx context.Context) {
+	// Check Database
+	dbStatus := 0.0
+	if err := g.db.Health(ctx); err == nil {
+		dbStatus = 1.0
+	}
+	dependencyUp.WithLabelValues("postgres").Set(dbStatus)
+
+	// Check Redis
+	redisStatus := 0.0
+	if err := g.cache.Health(ctx); err == nil {
+		redisStatus = 1.0
+	}
+	dependencyUp.WithLabelValues("redis").Set(redisStatus)
 }
 
 // ServeHTTP implements http.Handler
