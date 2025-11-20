@@ -42,7 +42,7 @@ services:
     networks:
       - crosslogic-network
 
-  # Redis Cache & JuiceFS Metadata Store
+  # Redis Cache (for rate limiting)
   redis:
     image: redis:7-alpine
     container_name: crosslogic-redis
@@ -87,11 +87,12 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
 
-      # JuiceFS (for fast model loading via S3)
-      - JUICEFS_REDIS_URL=redis://redis:6379/1
-      - JUICEFS_BUCKET=${JUICEFS_BUCKET}
-      - JUICEFS_ACCESS_KEY=${JUICEFS_ACCESS_KEY}
-      - JUICEFS_SECRET_KEY=${JUICEFS_SECRET_KEY}
+      # Cloudflare R2 (for fast model loading - vLLM native S3 support)
+      - R2_ENDPOINT=${R2_ENDPOINT}
+      - R2_BUCKET=${R2_BUCKET:-crosslogic-models}
+      - R2_ACCESS_KEY=${R2_ACCESS_KEY}
+      - R2_SECRET_KEY=${R2_SECRET_KEY}
+      - R2_CDN_DOMAIN=${R2_CDN_DOMAIN}
 
       # Stripe (use test keys or set via .env)
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy}

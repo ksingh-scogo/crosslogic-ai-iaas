@@ -68,8 +68,8 @@ type SkyPilotOrchestrator struct {
 	vllmVersion  string
 	torchVersion string
 
-	// juiceFSConfig holds JuiceFS configuration
-	juiceFSConfig config.JuiceFSConfig
+	// r2Config holds Cloudflare R2 configuration
+	r2Config config.R2Config
 }
 
 // NodeConfig defines the configuration for launching a new GPU node.
@@ -177,22 +177,23 @@ resources:
 setup: |
   set -e  # Exit on error
 
-  echo "=== Installing JuiceFS ==="
-  curl -sSL https://d.juicefs.com/install | sh -
-
-  echo "=== Configuring JuiceFS ==="
-  export REDIS_URL="{{.JuiceFSRedisURL}}"
-  export ACCESS_KEY="{{.JuiceFSAccessKey}}"
-  export SECRET_KEY="{{.JuiceFSSecretKey}}"
-  export BUCKET="{{.JuiceFSBucket}}"
-
-  if [ -n "$REDIS_URL" ] && [ -n "$BUCKET" ]; then
-    juicefs format --storage s3 --bucket "$BUCKET" --access-key "$ACCESS_KEY" --secret-key "$SECRET_KEY" redis://${REDIS_URL} crosslogic-models || true
-    
-    mkdir -p /mnt/models
-    juicefs mount crosslogic-models /mnt/models --cache-dir /nvme/juicefs-cache --cache-size 500000 --buffer-size 1024 --prefetch 3 --writeback --background || echo "JuiceFS mount failed, continuing..."
+  echo "=== Configuring Cloudflare R2 for Model Storage ==="
+  export AWS_ACCESS_KEY_ID="{{.R2AccessKey}}"
+  export AWS_SECRET_ACCESS_KEY="{{.R2SecretKey}}"
+  export AWS_ENDPOINT_URL="{{.R2Endpoint}}"
+  export HF_HUB_ENABLE_HF_TRANSFER=1
+  
+  # Create HuggingFace cache directory
+  mkdir -p ~/.cache/huggingface
+  
+  if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_ENDPOINT_URL" ]; then
+    echo "✓ R2 credentials configured"
+    echo "  Endpoint: $AWS_ENDPOINT_URL"
+    echo "  Bucket: {{.R2Bucket}}"
+    echo "  Models will be streamed directly from R2"
+    echo "  Cache directory: ~/.cache/huggingface"
   else
-    echo "JuiceFS configuration missing, skipping mount"
+    echo "⚠️  R2 not configured - models will be downloaded from HuggingFace"
   fi
 
   echo "=== Installing Python and vLLM ==="
@@ -226,24 +227,43 @@ run: |
   source /opt/vllm-env/bin/activate
 
   echo "=== Starting vLLM Server ==="
-  # Start vLLM in background with logging
-  # Use /mnt/models if mounted, otherwise fallback or error
-  MODEL_PATH="/mnt/models/{{.Model}}"
-  if [ ! -d "$MODEL_PATH" ]; then
-     echo "JuiceFS mount not found, falling back to direct download (slow)"
-     MODEL_PATH="{{.Model}}"
+  # Set up model path - vLLM will handle S3:// URLs natively
+  MODEL_NAME="{{.Model}}"
+  
+  # Check if model is in R2
+  if [ -n "$AWS_ENDPOINT_URL" ] && [ -n "{{.R2Bucket}}" ]; then
+    # Use S3 URL for model stored in R2
+    # vLLM natively supports s3:// URLs via HuggingFace Hub
+    R2_MODEL_PATH="s3://{{.R2Bucket}}/$MODEL_NAME"
+    
+    echo "✓ Checking if model exists in R2..."
+    # Quick check (optional - vLLM will fail gracefully if not found)
+    if aws s3 ls "$R2_MODEL_PATH/" --endpoint-url "$AWS_ENDPOINT_URL" &> /dev/null; then
+      echo "✓ Model found in R2: $R2_MODEL_PATH"
+      echo "  vLLM will stream directly from Cloudflare R2"
+      echo "  First load: ~30-60s (CDN fetch + cache)"
+      echo "  Subsequent loads: ~5-10s (local HF cache)"
+      MODEL_PATH="$R2_MODEL_PATH"
+    else
+      echo "⚠️  Model not found in R2: $R2_MODEL_PATH"
+      echo "  Falling back to HuggingFace download"
+      echo "  To upload: python scripts/upload-model-to-r2.py $MODEL_NAME"
+      MODEL_PATH="$MODEL_NAME"
+    fi
+  else
+    echo "⚠️  R2 not configured - using HuggingFace download"
+    MODEL_PATH="$MODEL_NAME"
   fi
 
+  echo "Starting vLLM with model: $MODEL_PATH"
   nohup python -m vllm.entrypoints.openai.api_server \
-    --model $MODEL_PATH \
+    --model "$MODEL_PATH" \
     --host 0.0.0.0 \
     --port 8000 \
     --gpu-memory-utilization 0.9 \
     --max-num-seqs 256 \
     --max-model-len 32768 \
     --enable-prefix-caching \
-    --kv-cache-dtype fp8 \
-    --quantization fp8 \
     --disable-log-requests \
     --tensor-parallel-size {{.TensorParallel}} \
 {{- if .VLLMArgs }}
@@ -311,7 +331,7 @@ run: |
 //	    "https://api.crosslogic.ai",
 //	    "https://api.crosslogic.ai",
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus, juiceFSConfig config.JuiceFSConfig) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus, r2Config config.R2Config) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
@@ -326,7 +346,7 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		controlPlaneURL: controlPlaneURL,
 		vllmVersion:     vllmVersion,
 		torchVersion:    torchVersion,
-		juiceFSConfig:   juiceFSConfig,
+		r2Config:        r2Config,
 	}, nil
 }
 
@@ -730,13 +750,13 @@ func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig, clusterName s
 		"VLLMArgs":         config.VLLMArgs,
 		"TensorParallel":   config.TensorParallel,
 		"ControlPlaneURL":  o.controlPlaneURL,
-		"VLLMVersion":      o.vllmVersion,
-		"TorchVersion":     o.torchVersion,
-		"Timestamp":        time.Now().Format(time.RFC3339),
-		"JuiceFSRedisURL":  o.juiceFSConfig.RedisURL,
-		"JuiceFSBucket":    o.juiceFSConfig.Bucket,
-		"JuiceFSAccessKey": o.juiceFSConfig.AccessKey,
-		"JuiceFSSecretKey": o.juiceFSConfig.SecretKey,
+		"VLLMVersion":  o.vllmVersion,
+		"TorchVersion": o.torchVersion,
+		"Timestamp":    time.Now().Format(time.RFC3339),
+		"R2Endpoint":   o.r2Config.Endpoint,
+		"R2Bucket":     o.r2Config.Bucket,
+		"R2AccessKey":  o.r2Config.AccessKey,
+		"R2SecretKey":  o.r2Config.SecretKey,
 	}
 
 	// Execute template
