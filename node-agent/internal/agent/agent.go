@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -64,6 +66,11 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Start health monitoring
 	go a.healthMonitorLoop(ctx)
+
+	// Start spot termination monitoring
+	if a.config.SpotInstance {
+		go a.terminationMonitorLoop(ctx)
+	}
 
 	return nil
 }
@@ -270,4 +277,222 @@ func (a *Agent) monitorHealth(ctx context.Context) {
 		a.logger.Warn("vLLM health check failed")
 		// TODO: Report to control plane
 	}
+}
+
+// terminationMonitorLoop polls for spot instance termination warnings
+func (a *Agent) terminationMonitorLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.stopChan:
+			return
+		case <-ticker.C:
+			if a.checkTerminationWarning(ctx) {
+				a.logger.Warn("spot termination warning detected - initiating graceful drain")
+
+				// Report to control plane immediately
+				if err := a.reportTerminationWarning(ctx); err != nil {
+					a.logger.Error("failed to report termination warning", zap.Error(err))
+				}
+
+				// Initiate graceful drain
+				a.gracefulDrain(ctx)
+
+				// Exit after draining - the orchestrator will launch replacement node
+				return
+			}
+		}
+	}
+}
+
+// gracefulDrain performs graceful shutdown when spot termination is imminent
+func (a *Agent) gracefulDrain(ctx context.Context) {
+	a.logger.Info("starting graceful drain procedure")
+
+	// Mark node as draining in control plane
+	a.markNodeDraining(ctx)
+
+	// Wait for in-flight requests to complete
+	// In production, you would:
+	// 1. Stop accepting new requests
+	// 2. Wait for existing requests to complete (with timeout)
+	// 3. Flush any buffered data
+	// 4. Clean up resources
+
+	drainTimeout := 90 * time.Second // Most cloud providers give 2 minutes warning
+	drainDeadline := time.Now().Add(drainTimeout)
+
+	a.logger.Info("waiting for in-flight requests to complete",
+		zap.Duration("timeout", drainTimeout),
+	)
+
+	// Poll vLLM to check if requests are still being processed
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for time.Now().Before(drainDeadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Check if vLLM has in-flight requests
+			// For now, we just wait the full duration
+			// In production, you'd check vLLM metrics endpoint for active requests
+			if time.Now().Add(10 * time.Second).After(drainDeadline) {
+				a.logger.Info("drain deadline approaching - forcing shutdown")
+				return
+			}
+		}
+	}
+
+	a.logger.Info("graceful drain completed")
+}
+
+// markNodeDraining marks the node as draining in the control plane
+func (a *Agent) markNodeDraining(ctx context.Context) {
+	if a.nodeID == "" {
+		return
+	}
+
+	url := fmt.Sprintf("%s/admin/nodes/%s/drain", a.config.ControlPlaneURL, a.nodeID)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		a.logger.Error("failed to mark node as draining", zap.Error(err))
+		return
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("failed to mark node as draining", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		a.logger.Info("node marked as draining in control plane")
+	}
+}
+
+// checkTerminationWarning checks cloud provider metadata for termination signals
+func (a *Agent) checkTerminationWarning(ctx context.Context) bool {
+	switch a.config.Provider {
+	case "aws":
+		return a.checkAWSTermination(ctx)
+	case "gcp":
+		return a.checkGCPTermination(ctx)
+	case "azure":
+		return a.checkAzureTermination(ctx)
+	default:
+		return false
+	}
+}
+
+func (a *Agent) checkAWSTermination(ctx context.Context) bool {
+	// AWS Spot Instance Termination Notice
+	// http://169.254.169.254/latest/meta-data/spot/instance-action
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/latest/meta-data/spot/instance-action", nil)
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func (a *Agent) checkGCPTermination(ctx context.Context) bool {
+	// GCP Preemptible VM Termination Notice
+	// Returns "TRUE" if instance is being preempted, "FALSE" otherwise
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://metadata.google.internal/computeMetadata/v1/instance/preempted", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+
+	// GCP returns "TRUE" (uppercase) if being preempted
+	preempted := strings.TrimSpace(string(body))
+	return preempted == "TRUE"
+}
+
+func (a *Agent) checkAzureTermination(ctx context.Context) bool {
+	// Azure Scheduled Events API
+	// https://learn.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Metadata", "true")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	// Parse Azure Scheduled Events response
+	var scheduledEvents struct {
+		Events []struct {
+			EventType   string `json:"EventType"`
+			ResourceType string `json:"ResourceType"`
+			EventStatus string `json:"EventStatus"`
+		} `json:"Events"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&scheduledEvents); err != nil {
+		return false
+	}
+
+	// Check for Preempt or Terminate events
+	for _, event := range scheduledEvents.Events {
+		if event.EventType == "Preempt" || event.EventType == "Terminate" {
+			if event.ResourceType == "VirtualMachine" && event.EventStatus == "Scheduled" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// reportTerminationWarning sends a warning to the control plane
+func (a *Agent) reportTerminationWarning(ctx context.Context) error {
+	url := fmt.Sprintf("%s/admin/nodes/%s/termination-warning", a.config.ControlPlaneURL, a.nodeID)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }

@@ -72,6 +72,10 @@ func main() {
 	billingEngine := billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
 	logger.Info("initialized billing engine")
 
+	// Initialize cost tracker for per-tenant cost aggregation
+	costTracker := billing.NewCostTracker(db, logger)
+	logger.Info("initialized cost tracker")
+
 	// Initialize webhook handler with event bus
 	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger, eventBus)
 	logger.Info("initialized webhook handler")
@@ -84,29 +88,62 @@ func main() {
 		cfg.Runtime.VLLMVersion,
 		cfg.Runtime.TorchVersion,
 		eventBus,
+		cfg.JuiceFS,
 	)
 	if err != nil {
 		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
 	}
 	logger.Info("initialized SkyPilot orchestrator")
 
-	// Start background services
+	// Initialize Triple Safety Monitor
+	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch, eventBus)
+	logger.Info("initialized triple safety monitor")
+
+	// Initialize State Reconciler with Triple Safety Monitor integration
+	reconciler := orchestrator.NewStateReconciler(db, logger, orch, monitor)
+	logger.Info("initialized state reconciler")
+
+	// Start background services context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize API gateway with event bus
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
+	gw.StartHealthMetrics(ctx)
+
+	// Start queue depth monitoring for intelligent load balancing
+	gw.LoadBalancer.StartQueueMonitoring(ctx)
+	logger.Info("initialized API gateway with queue monitoring")
+
+	// Initialize Deployment Controller
+	deploymentController := orchestrator.NewDeploymentController(db, logger, orch, gw.LoadBalancer)
+	logger.Info("initialized deployment controller")
+
+	// Initialize Model Cache Warmer for JuiceFS optimization
+	cacheWarmer := orchestrator.NewModelCacheWarmer(db, logger, orch)
+	logger.Info("initialized model cache warmer")
+
+	// Start monitor and reconciler
+	monitor.Start(ctx)
+	reconciler.Start(ctx)
+	deploymentController.Start(ctx)
+
+	// Start predictive cache warming
+	cacheWarmer.Start(ctx)
+	logger.Info("started predictive cache warming")
+
 	// Start billing background jobs
 	billingEngine.StartBackgroundJobs(ctx)
+
+	// Start cost tracker aggregation loop
+	costTracker.Start(ctx)
+	logger.Info("started cost tracker")
 
 	// Start notification service
 	if err := notificationService.Start(ctx); err != nil {
 		logger.Fatal("failed to start notification service", zap.Error(err))
 	}
 	logger.Info("started notification service")
-
-	// Initialize API gateway with event bus
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, cfg.Security.AdminAPIToken, eventBus)
-	gw.StartHealthMetrics(ctx)
-	logger.Info("initialized API gateway")
 
 	// Create HTTP server
 	server := &http.Server{

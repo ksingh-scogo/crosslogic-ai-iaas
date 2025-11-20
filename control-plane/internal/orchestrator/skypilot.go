@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/crosslogic/control-plane/internal/config"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
@@ -63,8 +64,12 @@ type SkyPilotOrchestrator struct {
 	controlPlaneURL string
 
 	// runtime versions for dependency pinning
+	// runtime versions for dependency pinning
 	vllmVersion  string
 	torchVersion string
+
+	// juiceFSConfig holds JuiceFS configuration
+	juiceFSConfig config.JuiceFSConfig
 }
 
 // NodeConfig defines the configuration for launching a new GPU node.
@@ -85,6 +90,9 @@ type NodeConfig struct {
 	// GPU specifies the GPU type (e.g., A100, V100, A10G, H100)
 	GPU string `json:"gpu"`
 
+	// GPUCount specifies the number of GPUs (e.g., 1, 4, 8)
+	GPUCount int `json:"gpu_count"`
+
 	// Model is the LLM model to serve (e.g., meta-llama/Llama-2-7b-chat-hf)
 	Model string `json:"model"`
 
@@ -99,6 +107,38 @@ type NodeConfig struct {
 	// VLLMArgs are additional arguments passed to vLLM server
 	// Example: "--tensor-parallel-size 2 --max-model-len 4096"
 	VLLMArgs string `json:"vllm_args"`
+
+	// TensorParallel is the tensor parallel size for vLLM (usually equals GPUCount)
+	TensorParallel int `json:"tensor_parallel"`
+
+	// DeploymentID links this node to a deployment (optional)
+	DeploymentID string `json:"deployment_id,omitempty"`
+}
+
+// GenerateClusterName generates a unique cluster name based on the naming convention.
+// Format: cic-{provider}-{region}-{gpu}-{spot|od}-{id}
+func GenerateClusterName(config NodeConfig) string {
+	pricing := "od" // on-demand
+	if config.UseSpot {
+		pricing = "spot"
+	}
+
+	// Short region names for readability (simple replacement for now)
+	region := strings.ReplaceAll(config.Region, "-", "")
+
+	// Use first 6 chars of NodeID for uniqueness
+	id := "unknown"
+	if len(config.NodeID) >= 6 {
+		id = config.NodeID[:6]
+	}
+
+	return fmt.Sprintf("cic-%s-%s-%s-%s-%s",
+		config.Provider,
+		region,
+		strings.ToLower(config.GPU),
+		pricing,
+		id,
+	)
 }
 
 // SkyPilotTaskTemplate is the Go template for generating SkyPilot task YAML.
@@ -122,12 +162,12 @@ const SkyPilotTaskTemplate = `# SkyPilot Task: CrossLogic Inference Node
 # Generated: {{.Timestamp}}
 # Node ID: {{.NodeID}}
 
-name: cic-{{.NodeID}}
+name: {{.ClusterName}}
 
 resources:
-  accelerators: {{.GPU}}:1
-  cloud: {{.Provider}}
-  region: {{.Region}}
+  accelerators: {{.GPU}}:{{.GPUCount}}
+  {{if .Provider}}cloud: {{.Provider}}{{end}}
+  {{if .Region}}region: {{.Region}}{{end}}
   {{if .UseSpot}}use_spot: true
   spot_recovery: true{{else}}use_spot: false{{end}}
   disk_size: {{.DiskSize}}
@@ -136,6 +176,24 @@ resources:
 # Setup: Install dependencies and configure environment
 setup: |
   set -e  # Exit on error
+
+  echo "=== Installing JuiceFS ==="
+  curl -sSL https://d.juicefs.com/install | sh -
+
+  echo "=== Configuring JuiceFS ==="
+  export REDIS_URL="{{.JuiceFSRedisURL}}"
+  export ACCESS_KEY="{{.JuiceFSAccessKey}}"
+  export SECRET_KEY="{{.JuiceFSSecretKey}}"
+  export BUCKET="{{.JuiceFSBucket}}"
+
+  if [ -n "$REDIS_URL" ] && [ -n "$BUCKET" ]; then
+    juicefs format --storage s3 --bucket "$BUCKET" --access-key "$ACCESS_KEY" --secret-key "$SECRET_KEY" redis://${REDIS_URL} crosslogic-models || true
+    
+    mkdir -p /mnt/models
+    juicefs mount crosslogic-models /mnt/models --cache-dir /nvme/juicefs-cache --cache-size 500000 --buffer-size 1024 --prefetch 3 --writeback --background || echo "JuiceFS mount failed, continuing..."
+  else
+    echo "JuiceFS configuration missing, skipping mount"
+  fi
 
   echo "=== Installing Python and vLLM ==="
   # Install Python 3.10 if not present
@@ -160,11 +218,6 @@ setup: |
     echo "Warning: Failed to download node agent, using fallback"
   chmod +x /usr/local/bin/node-agent
 
-  echo "=== Pre-downloading Model (if needed) ==="
-  # Pre-download model to cache to speed up startup
-  python3 -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('{{.Model}}')" || \
-    echo "Warning: Model pre-download failed, will download on first use"
-
   echo "=== Setup Complete ==="
 
 # Run: Start vLLM and node agent
@@ -174,13 +227,25 @@ run: |
 
   echo "=== Starting vLLM Server ==="
   # Start vLLM in background with logging
+  # Use /mnt/models if mounted, otherwise fallback or error
+  MODEL_PATH="/mnt/models/{{.Model}}"
+  if [ ! -d "$MODEL_PATH" ]; then
+     echo "JuiceFS mount not found, falling back to direct download (slow)"
+     MODEL_PATH="{{.Model}}"
+  fi
+
   nohup python -m vllm.entrypoints.openai.api_server \
-    --model {{.Model}} \
+    --model $MODEL_PATH \
     --host 0.0.0.0 \
     --port 8000 \
     --gpu-memory-utilization 0.9 \
     --max-num-seqs 256 \
+    --max-model-len 32768 \
+    --enable-prefix-caching \
+    --kv-cache-dtype fp8 \
+    --quantization fp8 \
     --disable-log-requests \
+    --tensor-parallel-size {{.TensorParallel}} \
 {{- if .VLLMArgs }}
     {{.VLLMArgs}} \
 {{- end}}
@@ -244,8 +309,9 @@ run: |
 //	    database,
 //	    logger,
 //	    "https://api.crosslogic.ai",
+//	    "https://api.crosslogic.ai",
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus, juiceFSConfig config.JuiceFSConfig) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
@@ -260,6 +326,7 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		controlPlaneURL: controlPlaneURL,
 		vllmVersion:     vllmVersion,
 		torchVersion:    torchVersion,
+		juiceFSConfig:   juiceFSConfig,
 	}, nil
 }
 
@@ -288,7 +355,7 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 // - Cloud API errors: Propagated from SkyPilot (check cloud credentials)
 //
 // Returns:
-// - string: Cluster name (format: "cic-{nodeID}")
+// - string: Cluster name (format: "cic-{provider}-{region}-{gpu}-{spot|od}-{id}")
 // - error: Validation error, template error, or SkyPilot launch failure
 func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig) (string, error) {
 	startTime := time.Now()
@@ -298,17 +365,21 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 		return "", fmt.Errorf("invalid node configuration: %w", err)
 	}
 
+	clusterName := GenerateClusterName(config)
+
 	o.logger.Info("launching GPU node with SkyPilot",
 		zap.String("node_id", config.NodeID),
+		zap.String("cluster_name", clusterName),
 		zap.String("provider", config.Provider),
 		zap.String("region", config.Region),
 		zap.String("gpu", config.GPU),
+		zap.Int("gpu_count", config.GPUCount),
 		zap.String("model", config.Model),
 		zap.Bool("use_spot", config.UseSpot),
 	)
 
 	// Generate task YAML
-	taskYAML, err := o.generateTaskYAML(config)
+	taskYAML, err := o.generateTaskYAML(config, clusterName)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate task YAML: %w", err)
 	}
@@ -326,7 +397,6 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 	)
 
 	// Launch with SkyPilot
-	clusterName := fmt.Sprintf("cic-%s", config.NodeID)
 	cmd := exec.CommandContext(ctx, "sky", "launch",
 		"-c", clusterName, // Cluster name
 		taskFile,       // Task file
@@ -365,17 +435,16 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 			events.EventNodeLaunched,
 			"", // No tenant ID for system events
 			map[string]interface{}{
-				"node_id":          config.NodeID,
-				"cluster_name":     clusterName,
-				"provider":         config.Provider,
-				"region":           config.Region,
-				"instance_type":    config.InstanceType,
-				"gpu_type":         config.GPU,
-				"gpu_count":        config.AcceleratorCount,
-				"spot_instance":    config.UseSpot,
-				"spot_price":       config.SpotBidPrice,
-				"model":            config.Model,
-				"launch_duration":  launchDuration.String(),
+				"node_id":         config.NodeID,
+				"cluster_name":    clusterName,
+				"provider":        config.Provider,
+				"region":          config.Region,
+				"instance_type":   "unknown", // Not in config anymore, maybe infer?
+				"gpu_type":        config.GPU,
+				"gpu_count":       config.GPUCount,
+				"spot_instance":   config.UseSpot,
+				"model":           config.Model,
+				"launch_duration": launchDuration.String(),
 			},
 		)
 		if err := o.eventBus.Publish(ctx, evt); err != nil {
@@ -509,6 +578,12 @@ func (o *SkyPilotOrchestrator) GetNodeStatus(ctx context.Context, clusterName st
 	return "UNKNOWN", nil
 }
 
+// GetClusterStatus is an alias for GetNodeStatus for semantic clarity
+// in the monitoring context. It returns the status of a SkyPilot cluster.
+func (o *SkyPilotOrchestrator) GetClusterStatus(clusterName string) (string, error) {
+	return o.GetNodeStatus(context.Background(), clusterName)
+}
+
 // ListNodes returns all active GPU nodes managed by SkyPilot.
 //
 // This queries the local SkyPilot database for all clusters with the
@@ -543,6 +618,32 @@ func (o *SkyPilotOrchestrator) ListNodes(ctx context.Context) ([]string, error) 
 	return nodeNames, nil
 }
 
+// ExecCommand executes a command on a running node.
+//
+// Uses `sky exec` to run the command via SSH.
+//
+// Returns:
+// - string: Command output (stdout + stderr)
+// - error: Execution failure
+func (o *SkyPilotOrchestrator) ExecCommand(ctx context.Context, clusterName, command string) (string, error) {
+	o.logger.Debug("executing command on node",
+		zap.String("cluster_name", clusterName),
+		zap.String("command", command),
+	)
+
+	cmd := exec.CommandContext(ctx, "sky", "exec",
+		clusterName,
+		command,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sky exec failed: %w\nOutput: %s", err, output)
+	}
+
+	return string(output), nil
+}
+
 // validateNodeConfig validates and sets defaults for node configuration.
 func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 	// Validate required fields
@@ -569,6 +670,14 @@ func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 	// Set defaults
 	if config.DiskSize == 0 {
 		config.DiskSize = 256 // 256GB default
+	}
+
+	if config.GPUCount == 0 {
+		config.GPUCount = 1
+	}
+
+	if config.TensorParallel == 0 {
+		config.TensorParallel = config.GPUCount
 	}
 
 	// Sanitize optional VLLM args
@@ -606,21 +715,28 @@ func sanitizeVLLMArgs(args string) (string, error) {
 }
 
 // generateTaskYAML generates SkyPilot task YAML from configuration.
-func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig) (string, error) {
+func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig, clusterName string) (string, error) {
 	// Prepare template data
 	data := map[string]interface{}{
-		"NodeID":          config.NodeID,
-		"Provider":        config.Provider,
-		"Region":          config.Region,
-		"GPU":             config.GPU,
-		"Model":           config.Model,
-		"UseSpot":         config.UseSpot,
-		"DiskSize":        config.DiskSize,
-		"VLLMArgs":        config.VLLMArgs,
-		"ControlPlaneURL": o.controlPlaneURL,
-		"VLLMVersion":     o.vllmVersion,
-		"TorchVersion":    o.torchVersion,
-		"Timestamp":       time.Now().Format(time.RFC3339),
+		"NodeID":           config.NodeID,
+		"ClusterName":      clusterName,
+		"Provider":         config.Provider,
+		"Region":           config.Region,
+		"GPU":              config.GPU,
+		"GPUCount":         config.GPUCount,
+		"Model":            config.Model,
+		"UseSpot":          config.UseSpot,
+		"DiskSize":         config.DiskSize,
+		"VLLMArgs":         config.VLLMArgs,
+		"TensorParallel":   config.TensorParallel,
+		"ControlPlaneURL":  o.controlPlaneURL,
+		"VLLMVersion":      o.vllmVersion,
+		"TorchVersion":     o.torchVersion,
+		"Timestamp":        time.Now().Format(time.RFC3339),
+		"JuiceFSRedisURL":  o.juiceFSConfig.RedisURL,
+		"JuiceFSBucket":    o.juiceFSConfig.Bucket,
+		"JuiceFSAccessKey": o.juiceFSConfig.AccessKey,
+		"JuiceFSSecretKey": o.juiceFSConfig.SecretKey,
 	}
 
 	// Execute template
@@ -637,8 +753,8 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 	query := `
 		INSERT INTO nodes (
 			id, cluster_name, provider, region, gpu_type,
-			model_name, status, endpoint, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'initializing', '', NOW())
+			model_name, status, endpoint, created_at, deployment_id
+		) VALUES ($1, $2, $3, $4, $5, $6, 'initializing', '', NOW(), $7)
 		ON CONFLICT (id) DO UPDATE
 		SET cluster_name = $2, status = 'initializing', updated_at = NOW()
 	`
@@ -648,6 +764,15 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 		return fmt.Errorf("invalid node ID: %w", err)
 	}
 
+	var deploymentID *uuid.UUID
+	if config.DeploymentID != "" {
+		id, err := uuid.Parse(config.DeploymentID)
+		if err != nil {
+			return fmt.Errorf("invalid deployment ID: %w", err)
+		}
+		deploymentID = &id
+	}
+
 	_, err = o.db.Pool.Exec(ctx, query,
 		nodeID,
 		clusterName,
@@ -655,6 +780,7 @@ func (o *SkyPilotOrchestrator) registerNode(ctx context.Context, config NodeConf
 		config.Region,
 		config.GPU,
 		config.Model,
+		deploymentID,
 	)
 
 	return err
@@ -670,4 +796,44 @@ func (o *SkyPilotOrchestrator) updateNodeStatus(ctx context.Context, clusterName
 
 	_, err := o.db.Pool.Exec(ctx, query, status, clusterName)
 	return err
+}
+
+// ModelConfigGenerator helps determine optimal GPU configuration for a model.
+type ModelConfigGenerator struct {
+	modelSizes map[string]int64 // Model name -> parameter count
+}
+
+// NewModelConfigGenerator creates a new generator with known model sizes.
+func NewModelConfigGenerator() *ModelConfigGenerator {
+	return &ModelConfigGenerator{
+		modelSizes: map[string]int64{
+			"meta-llama/Llama-2-7b-chat-hf":     7_000_000_000,
+			"meta-llama/Llama-2-13b-chat-hf":    13_000_000_000,
+			"meta-llama/Llama-2-70b-chat-hf":    70_000_000_000,
+			"meta-llama/Llama-3-8b-instruct":    8_000_000_000,
+			"meta-llama/Llama-3-70b-instruct":   70_000_000_000,
+			"meta-llama/Llama-3-405b-instruct":  405_000_000_000,
+			"deepseek-ai/deepseek-llm-67b-chat": 67_000_000_000,
+		},
+	}
+}
+
+// GetOptimalConfig returns the optimal GPU configuration for a given model.
+func (g *ModelConfigGenerator) GetOptimalConfig(modelName string) (string, int, int) {
+	paramCount, ok := g.modelSizes[modelName]
+	if !ok {
+		// Default to A100:1 if unknown
+		return "A100", 1, 1
+	}
+
+	switch {
+	case paramCount < 14_000_000_000: // < 14B
+		return "A10G", 1, 1 // Cost effective
+	case paramCount < 70_000_000_000: // < 70B
+		return "A100", 1, 1
+	case paramCount < 200_000_000_000: // 70B - 200B
+		return "H100", 4, 4 // Needs multi-GPU
+	default: // 200B+
+		return "H100", 8, 8
+	}
 }

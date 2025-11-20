@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/stripe/stripe-go/v76/webhook"
 	"go.uber.org/zap"
 )
@@ -16,7 +17,7 @@ import (
 func TestWebhookHandler_HandleWebhook_SignatureVerification(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	// Pass nil for DB and Cache as we are testing signature verification which happens before DB access
-	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger)
+	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger, events.NewBus(logger))
 
 	tests := []struct {
 		name           string
@@ -63,7 +64,7 @@ func TestWebhookHandler_HandleWebhook_SignatureVerification(t *testing.T) {
 
 func TestWebhookHandler_Idempotency(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
-	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger)
+	handler := NewWebhookHandler("whsec_test_secret", nil, nil, logger, events.NewBus(logger))
 
 	payload := []byte(`{"id": "evt_idempotency_test", "object": "event", "type": "unknown.event", "api_version": "2023-10-16"}`)
 	signature := generateSignature(t, payload, "whsec_test_secret")

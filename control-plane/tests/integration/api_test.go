@@ -2,7 +2,6 @@ package integration_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"github.com/crosslogic/control-plane/internal/orchestrator"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"go.uber.org/zap"
 )
 
@@ -46,11 +46,15 @@ func TestEndToEndAPI(t *testing.T) {
 	}
 	defer redisCache.Close()
 
+	// Initialize event bus
+	eventBus := events.NewBus(logger)
+
 	// Setup components
-	webhookHandler := billing.NewWebhookHandler("whsec_test", db, redisCache, logger)
-	orch, _ := orchestrator.NewSkyPilotOrchestrator(db, logger, "http://localhost:8080", "0.6.2", "2.4.0")
-	
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, "admin-token")
+	webhookHandler := billing.NewWebhookHandler("whsec_test", db, redisCache, logger, eventBus)
+	orch, _ := orchestrator.NewSkyPilotOrchestrator(db, logger, "http://localhost:8080", "0.6.2", "2.4.0", eventBus, config.JuiceFSConfig{})
+
+	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch)
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, "admin-token", eventBus)
 
 	// Create test server
 	ts := httptest.NewServer(gw)
@@ -130,11 +134,10 @@ func TestEndToEndAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chat completion failed: %v", err)
 	}
-	
+
 	// We expect either 200 (if nodes exist) or 503 (if no nodes)
 	// 401 or 403 would indicate auth failure
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		t.Errorf("auth failed with status %d", resp.StatusCode)
 	}
 }
-

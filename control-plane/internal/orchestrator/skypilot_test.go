@@ -6,9 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/crosslogic/control-plane/internal/config"
 	"github.com/crosslogic/control-plane/pkg/database"
+	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 )
 
@@ -23,7 +26,7 @@ func TestNewSkyPilotOrchestrator(t *testing.T) {
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.crosslogic.ai"
 
-	orch, err := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion)
+	orch, err := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	if err != nil {
 		t.Fatalf("NewSkyPilotOrchestrator failed: %v", err)
@@ -54,7 +57,7 @@ func TestNewSkyPilotOrchestrator(t *testing.T) {
 func TestValidateNodeConfig(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	tests := []struct {
 		name        string
@@ -152,7 +155,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.test.com"
-	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -165,7 +168,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 		VLLMArgs: "--tensor-parallel-size 2",
 	}
 
-	yaml, err := orch.generateTaskYAML(config)
+	yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 
 	if err != nil {
 		t.Fatalf("generateTaskYAML failed: %v", err)
@@ -173,7 +176,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 
 	// Verify YAML contains expected content
 	expectedStrings := []string{
-		"name: cic-" + config.NodeID,
+		"name: cic-test-cluster",
 		"accelerators: A100:1",
 		"cloud: aws",
 		"region: us-west-2",
@@ -196,7 +199,7 @@ func TestGenerateTaskYAML(t *testing.T) {
 func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -208,7 +211,7 @@ func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 		DiskSize: 128,
 	}
 
-	yaml, err := orch.generateTaskYAML(config)
+	yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 
 	if err != nil {
 		t.Fatalf("generateTaskYAML failed: %v", err)
@@ -229,7 +232,7 @@ func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 func TestLaunchNode_YAMLFileCreation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -242,10 +245,8 @@ func TestLaunchNode_YAMLFileCreation(t *testing.T) {
 	}
 
 	// Generate YAML
-	yaml, err := orch.generateTaskYAML(config)
-	if err != nil {
-		t.Fatalf("generateTaskYAML failed: %v", err)
-	}
+	yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
+	assert.NoError(t, err)
 
 	// Write to temp file (simulating LaunchNode behavior)
 	taskFile := "/tmp/test-sky-task-" + config.NodeID + ".yaml"
@@ -338,7 +339,7 @@ func TestNodeConfig_JSONSerialization(t *testing.T) {
 func TestMultiCloudConfigurations(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	providers := []string{"aws", "gcp", "azure", "lambda", "oci"}
 
@@ -358,7 +359,7 @@ func TestMultiCloudConfigurations(t *testing.T) {
 				t.Errorf("Configuration should be valid for %s: %v", provider, err)
 			}
 
-			yaml, err := orch.generateTaskYAML(config)
+			yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 			if err != nil {
 				t.Errorf("YAML generation failed for %s: %v", provider, err)
 			}
@@ -374,7 +375,7 @@ func TestMultiCloudConfigurations(t *testing.T) {
 func TestGPUTypes(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	gpuTypes := []string{"A100", "V100", "A10G", "T4", "H100", "L4"}
 
@@ -388,7 +389,7 @@ func TestGPUTypes(t *testing.T) {
 				Model:    "test-model",
 			}
 
-			yaml, err := orch.generateTaskYAML(config)
+			yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 			if err != nil {
 				t.Errorf("YAML generation failed for %s: %v", gpu, err)
 			}
@@ -405,7 +406,7 @@ func TestGPUTypes(t *testing.T) {
 func TestVLLMArgsIncorporation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	customArgs := []string{
 		"--tensor-parallel-size 2",
@@ -425,7 +426,7 @@ func TestVLLMArgsIncorporation(t *testing.T) {
 				VLLMArgs: args,
 			}
 
-			yaml, err := orch.generateTaskYAML(config)
+			yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 			if err != nil {
 				t.Fatalf("YAML generation failed: %v", err)
 			}
@@ -441,7 +442,7 @@ func TestVLLMArgsIncorporation(t *testing.T) {
 func TestTaskYAMLStructure(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -451,7 +452,7 @@ func TestTaskYAMLStructure(t *testing.T) {
 		Model:    "test-model",
 	}
 
-	yaml, err := orch.generateTaskYAML(config)
+	yaml, err := orch.generateTaskYAML(config, "cic-test-cluster")
 	if err != nil {
 		t.Fatalf("YAML generation failed: %v", err)
 	}
@@ -494,7 +495,7 @@ func TestTaskYAMLStructure(t *testing.T) {
 func BenchmarkGenerateTaskYAML(b *testing.B) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
@@ -519,7 +520,7 @@ func BenchmarkGenerateTaskYAML(b *testing.B) {
 func TestConcurrentYAMLGeneration(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion)
+	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
 
 	done := make(chan bool, 10)
 	errors := make(chan error, 10)
@@ -534,7 +535,7 @@ func TestConcurrentYAMLGeneration(t *testing.T) {
 				Model:    "test-model",
 			}
 
-			_, err := orch.generateTaskYAML(config)
+			_, err := orch.generateTaskYAML(config, "test-cluster")
 			if err != nil {
 				errors <- err
 			}
