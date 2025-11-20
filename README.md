@@ -31,6 +31,9 @@ CrossLogic Inference Cloud (CIC) is a complete inference platform that makes LLM
 - **Multi-tenancy** - Isolated orgs, environments, API keys
 - **Usage-based billing** - Stripe integration
 - **On-premise support** - Hybrid cloud deployment
+- **🆕 UI-Driven Operations** - No CLI needed, launch instances from dashboard
+- **🆕 100% Dockerized** - Zero local dependencies, just Docker!
+- **🆕 Direct S3 Streaming** - Fast model loading from Cloudflare R2
 
 ### Target Users
 
@@ -111,15 +114,56 @@ Storage Layer:
 
 ## 🚀 Quick Start
 
-### Prerequisites
+> **🆕 UPDATED**: Now 100% Dockerized with UI-driven operations! No Go/npm/CLI needed locally.
+> 
+> **⚡ 5-Minute Setup**: See [`QUICK_START.md`](QUICK_START.md) for the fastest way to get started.
+> 
+> **📖 Complete Guide**: See [`UPDATED_LOCAL_SETUP.md`](UPDATED_LOCAL_SETUP.md) for detailed instructions.
 
-- Docker **24+** & Docker Compose **v2**
-- Stripe account (test mode is fine)
-- Hugging Face account/token (to pull open models)
-- GPU access (local CUDA host or any SkyPilot-supported cloud)
-- **[Optional]** Cloudflare R2 account for ultra-fast model loading (see [R2 Setup](docs/R2_SETUP_GUIDE.md))
+### What You Need
 
-> **💡 New**: With Cloudflare R2 + vLLM's native S3 support, your GPU instances load models in **~30 seconds** instead of 5-10 minutes, saving **99.9% on bandwidth costs**. See [Setup Guide](docs/R2_SETUP_GUIDE.md).
+- **Docker 24+** & Docker Compose v2 (that's it!)
+- Cloudflare R2 account (for model storage)
+- Azure/AWS account (for GPU instances)
+- HuggingFace token (for model downloads)
+
+### Setup in 3 Steps
+
+**1. Configure**
+```bash
+# Create .env file with your credentials
+cp config/.env.example .env
+nano .env  # Add your R2, Azure/AWS credentials
+```
+
+**2. Start**
+```bash
+# Build and start all services
+docker compose up -d
+
+# Wait 30 seconds for services to be ready
+sleep 30
+```
+
+**3. Launch**
+```bash
+# Open dashboard
+open http://localhost:3000
+
+# Click "Launch Instance" → Select Model → Click Launch
+# Watch real-time progress - done in 5-10 minutes!
+```
+
+### What You Get
+
+- ✅ **Dashboard**: http://localhost:3000 (Admin UI)
+- ✅ **API Gateway**: http://localhost:8080 (OpenAI-compatible)
+- ✅ **UI-Driven Launches**: No CLI commands needed
+- ✅ **Real-Time Monitoring**: Visual status updates
+
+### Previous Setup (Optional)
+
+> **💡 Legacy**: With Cloudflare R2 + vLLM's native S3 support, your GPU instances load models in **~30 seconds** instead of 5-10 minutes, saving **99.9% on bandwidth costs**. See [Setup Guide](docs/R2_SETUP_GUIDE.md).
 
 ### 1. Clone Repository
 

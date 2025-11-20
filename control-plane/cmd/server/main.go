@@ -98,7 +98,7 @@ func main() {
 		cfg.Runtime.VLLMVersion,
 		cfg.Runtime.TorchVersion,
 		eventBus,
-		cfg.JuiceFS,
+		cfg.R2,
 	)
 	if err != nil {
 		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
@@ -129,7 +129,7 @@ func main() {
 	deploymentController := orchestrator.NewDeploymentController(db, logger, orch, gw.LoadBalancer)
 	logger.Info("initialized deployment controller")
 
-	// Initialize Model Cache Warmer for JuiceFS optimization
+	// Initialize Model Cache Warmer for R2/vLLM optimization
 	cacheWarmer := orchestrator.NewModelCacheWarmer(db, logger, orch)
 	logger.Info("initialized model cache warmer")
 
