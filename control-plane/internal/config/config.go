@@ -53,6 +53,7 @@ type RedisConfig struct {
 
 // BillingConfig holds billing configuration
 type BillingConfig struct {
+	Enabled             bool
 	StripeSecretKey     string
 	StripeWebhookSecret string
 	AggregationInterval time.Duration
@@ -121,6 +122,7 @@ func LoadConfig() (*Config, error) {
 			PoolSize: getEnvAsInt("REDIS_POOL_SIZE", 10),
 		},
 		Billing: BillingConfig{
+			Enabled:             getEnvAsBool("BILLING_ENABLED", true),
 			StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),
 			StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
 			AggregationInterval: getEnvAsDuration("BILLING_AGGREGATION_INTERVAL", "1h"),
@@ -157,8 +159,8 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("DB_PASSWORD is required")
 	}
 
-	if cfg.Billing.StripeSecretKey == "" {
-		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required")
+	if cfg.Billing.Enabled && cfg.Billing.StripeSecretKey == "" {
+		return nil, fmt.Errorf("STRIPE_SECRET_KEY is required when billing is enabled")
 	}
 
 	if cfg.Security.AdminAPIToken == "" {
