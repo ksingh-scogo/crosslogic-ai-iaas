@@ -68,17 +68,27 @@ func main() {
 	}
 	logger.Info("initialized notification service")
 
-	// Initialize billing engine
-	billingEngine := billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
-	logger.Info("initialized billing engine")
+	// Initialize billing engine when enabled
+	var billingEngine *billing.Engine
+	if cfg.Billing.Enabled {
+		billingEngine = billing.NewEngine(db, logger, cfg.Billing.StripeSecretKey)
+		logger.Info("initialized billing engine")
+	} else {
+		logger.Warn("billing disabled via configuration; skipping Stripe initialization")
+	}
 
 	// Initialize cost tracker for per-tenant cost aggregation
 	costTracker := billing.NewCostTracker(db, logger)
 	logger.Info("initialized cost tracker")
 
-	// Initialize webhook handler with event bus
-	webhookHandler := billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger, eventBus)
-	logger.Info("initialized webhook handler")
+	// Initialize webhook handler with event bus when billing is enabled
+	var webhookHandler *billing.WebhookHandler
+	if cfg.Billing.Enabled {
+		webhookHandler = billing.NewWebhookHandler(cfg.Billing.StripeWebhookSecret, db, redisCache, logger, eventBus)
+		logger.Info("initialized webhook handler")
+	} else {
+		logger.Info("billing disabled; webhook handler not registered")
+	}
 
 	// Initialize SkyPilot orchestrator with event bus
 	orch, err := orchestrator.NewSkyPilotOrchestrator(
@@ -132,10 +142,12 @@ func main() {
 	cacheWarmer.Start(ctx)
 	logger.Info("started predictive cache warming")
 
-	// Start billing background jobs
-	billingEngine.StartBackgroundJobs(ctx)
+	// Start billing background jobs if billing is enabled
+	if billingEngine != nil {
+		billingEngine.StartBackgroundJobs(ctx)
+	}
 
-	// Start cost tracker aggregation loop
+	// Start cost tracker aggregation loop (available even when billing disabled)
 	costTracker.Start(ctx)
 	logger.Info("started cost tracker")
 

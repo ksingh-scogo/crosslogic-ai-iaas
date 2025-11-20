@@ -130,6 +130,7 @@ cd crosslogic-ai-iaas
 cp config/.env.example .env
 
 # Required minimum (edit .env)
+BILLING_ENABLED=false  # disable Stripe while iterating locally; set true in staging/prod
 DB_PASSWORD=supersecure
 STRIPE_SECRET_KEY=sk_test_xxx
 STRIPE_WEBHOOK_SECRET=whsec_xxx
