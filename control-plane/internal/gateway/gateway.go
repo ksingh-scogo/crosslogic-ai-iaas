@@ -92,7 +92,13 @@ func (g *Gateway) setupRoutes() {
 	g.router.Get("/ready", g.handleReady)
 
 	// Stripe webhook endpoint (no auth - uses signature verification)
-	g.router.Post("/api/webhooks/stripe", g.webhookHandler.HandleWebhook)
+	if g.webhookHandler != nil {
+		g.router.Post("/api/webhooks/stripe", g.webhookHandler.HandleWebhook)
+	} else {
+		g.router.Post("/api/webhooks/stripe", func(w http.ResponseWriter, r *http.Request) {
+			g.writeError(w, http.StatusServiceUnavailable, "billing webhooks disabled")
+		})
+	}
 
 	// OpenAI-compatible endpoints (require auth)
 	g.router.Group(func(r chi.Router) {
