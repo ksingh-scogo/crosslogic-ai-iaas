@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/crosslogic/control-plane/internal/billing"
 	"github.com/crosslogic/control-plane/internal/orchestrator"
-	"github.com/crosslogic/control-plane/internal/scheduler"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/events"
@@ -34,16 +34,17 @@ type Gateway struct {
 	authenticator  *Authenticator
 	rateLimiter    *RateLimiter
 	router         *chi.Mux
-	scheduler      *scheduler.Scheduler
-	vllmProxy      *scheduler.VLLMProxy
 	webhookHandler *billing.WebhookHandler
 	orchestrator   *orchestrator.SkyPilotOrchestrator
+	monitor        *orchestrator.TripleSafetyMonitor
 	adminToken     string
 	eventBus       *events.Bus
+	// LoadBalancer handles intelligent request routing
+	LoadBalancer *IntelligentLoadBalancer
 }
 
 // NewGateway creates a new API gateway
-func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, adminToken string, eventBus *events.Bus) *Gateway {
+func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, monitor *orchestrator.TripleSafetyMonitor, adminToken string, eventBus *events.Bus) *Gateway {
 	g := &Gateway{
 		db:             db,
 		cache:          cache,
@@ -51,12 +52,12 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 		authenticator:  NewAuthenticator(db, cache, logger),
 		rateLimiter:    NewRateLimiter(cache, logger),
 		router:         chi.NewRouter(),
-		scheduler:      scheduler.NewScheduler(db, cache, logger),
-		vllmProxy:      scheduler.NewVLLMProxy(logger),
 		webhookHandler: webhookHandler,
 		orchestrator:   orch,
+		monitor:        monitor,
 		adminToken:     adminToken,
 		eventBus:       eventBus,
+		LoadBalancer:   NewIntelligentLoadBalancer(db, logger),
 	}
 
 	g.setupRoutes()
@@ -119,6 +120,8 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/nodes/launch", g.handleLaunchNode)
 		r.Post("/admin/nodes/{cluster_name}/terminate", g.handleTerminateNode)
 		r.Get("/admin/nodes/{cluster_name}/status", g.handleNodeStatus)
+		r.Post("/admin/nodes/{node_id}/heartbeat", g.handleHeartbeat)
+		r.Post("/admin/nodes/{node_id}/termination-warning", g.handleTerminationWarning)
 
 		// Usage and billing
 		r.Get("/admin/usage/{tenant_id}", g.handleGetUsage)
@@ -133,6 +136,59 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
 		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
 	})
+}
+
+func (g *Gateway) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		g.writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	var req struct {
+		HealthScore float64 `json:"health_score"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		g.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := g.monitor.RecordHeartbeat(r.Context(), nodeID, req.HealthScore); err != nil {
+		g.logger.Error("failed to record heartbeat", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to record heartbeat")
+		return
+	}
+
+	g.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) handleTerminationWarning(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		g.writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	g.logger.Warn("received spot termination warning", zap.String("node_id", nodeID))
+
+	// Mark node as terminating
+	query := `UPDATE nodes SET status = 'terminating', status_message = 'spot_termination_warning' WHERE id = $1`
+	_, err := g.db.Pool.Exec(r.Context(), query, nodeID)
+	if err != nil {
+		g.logger.Error("failed to update node status", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to process warning")
+		return
+	}
+
+	// Publish event
+	if g.eventBus != nil {
+		g.eventBus.Publish(r.Context(), events.NewEvent(events.EventNodeTerminated, "", map[string]interface{}{
+			"node_id": nodeID,
+			"reason":  "spot_termination",
+		}))
+	}
+
+	g.writeJSON(w, http.StatusOK, map[string]string{"status": "received"})
 }
 
 // StartHealthMetrics starts a background goroutine to update dependency health metrics
@@ -349,7 +405,6 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Get tenant/env info from context
 	tenantID := ctx.Value("tenant_id").(uuid.UUID)
 	envID := ctx.Value("environment_id").(uuid.UUID)
-	keyInfo := ctx.Value("api_key").(*models.APIKey)
 
 	g.logger.Info("chat completion request",
 		zap.String("tenant_id", tenantID.String()),
@@ -372,144 +427,47 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Continue without region preference
 	}
 
-	// Schedule request to an appropriate node
-	scheduleReq := &scheduler.ScheduleRequest{
-		Model:    req.Model,
-		Region:   envRegion,
-		TenantID: tenantID,
-		EnvID:    envID,
-		Reserved: false, // TODO: Check if tenant has reserved capacity
-	}
-
-	node, err := g.scheduler.ScheduleRequest(ctx, scheduleReq)
+	// Select best endpoint
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
-		g.logger.Error("failed to schedule request",
-			zap.Error(err),
-			zap.String("model", req.Model),
-			zap.String("region", envRegion),
-		)
-		g.writeError(w, http.StatusServiceUnavailable, "no available nodes for model")
+		g.logger.Error("failed to select endpoint", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
 		return
 	}
 
-	g.logger.Debug("request scheduled to node",
-		zap.String("node_id", node.ID.String()),
-		zap.String("endpoint", node.EndpointURL),
-		zap.String("provider", node.Provider),
-	)
+	if endpoint == "" {
+		g.writeError(w, http.StatusServiceUnavailable, "no healthy nodes for model")
+		return
+	}
 
-	// Record request start for billing
-	requestID := uuid.New()
-	startTime := time.Now()
-	estimatedTokens := estimateTokens(req.MaxTokens)
-	g.scheduler.TrackRequestStart(node.ID, estimatedTokens)
-	defer g.scheduler.TrackRequestEnd(node.ID, estimatedTokens)
+	// Proxy request to endpoint
+	// Re-create body reader for proxying
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	// Forward request to vLLM node
-	if req.Stream {
-		// Handle streaming response
-		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
-		if err != nil {
-			vllmProxyErrors.WithLabelValues(node.ID.String(), "streaming_failed").Inc()
-			g.logger.Error("streaming failed",
-				zap.Error(err),
-				zap.String("node_id", node.ID.String()),
-			)
-			return
-		}
+	start := time.Now()
+	resp, err := g.proxyRequest(endpoint, r)
+	duration := time.Since(start)
 
-		if streamUsage != nil {
-			requestIDStr := requestID.String()
-			g.recordUsage(ctx, models.UsageRecord{
-				ID:               requestID,
-				RequestID:        &requestIDStr,
-				Timestamp:        startTime,
-				TenantID:         tenantID,
-				EnvironmentID:    envID,
-				APIKeyID:         &keyInfo.ID,
-				NodeID:           &node.ID,
-				PromptTokens:     streamUsage.PromptTokens,
-				CompletionTokens: streamUsage.CompletionTokens,
-				TotalTokens:      streamUsage.TotalTokens,
-				LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
-			})
-		}
-	} else {
-		// Handle non-streaming response
-		resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
-		if err != nil {
-			vllmProxyErrors.WithLabelValues(node.ID.String(), "forward_failed").Inc()
-			g.logger.Error("request forwarding failed",
-				zap.Error(err),
-				zap.String("node_id", node.ID.String()),
-			)
-			g.writeError(w, http.StatusBadGateway, "inference request failed")
-			return
-		}
-		defer resp.Body.Close()
+	// Record stats
+	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
 
-		// Read response body for token usage extraction
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			g.logger.Error("failed to read response body", zap.Error(err))
-			g.writeError(w, http.StatusInternalServerError, "failed to read response")
-			return
-		}
+	if err != nil {
+		g.logger.Error("failed to proxy request", zap.Error(err))
+		g.writeError(w, http.StatusBadGateway, "failed to proxy request")
+		return
+	}
+	defer resp.Body.Close()
 
-		// Parse response to extract usage information
-		var completionResp map[string]interface{}
-		if err := json.Unmarshal(respBody, &completionResp); err == nil {
-			// Extract token usage if available
-			if usage, ok := completionResp["usage"].(map[string]interface{}); ok {
-				promptTokens := int(getFloat64(usage["prompt_tokens"]))
-				completionTokens := int(getFloat64(usage["completion_tokens"]))
-				totalTokens := int(getFloat64(usage["total_tokens"]))
-
-				// Record usage for billing
-				requestIDStr := requestID.String()
-				g.recordUsage(ctx, models.UsageRecord{
-					ID:               requestID,
-					RequestID:        &requestIDStr,
-					Timestamp:        startTime,
-					TenantID:         tenantID,
-					EnvironmentID:    envID,
-					APIKeyID:         &keyInfo.ID,
-					NodeID:           &node.ID,
-					PromptTokens:     promptTokens,
-					CompletionTokens: completionTokens,
-					TotalTokens:      totalTokens,
-					LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
-				})
-			}
-		}
-
-		// Copy response headers
-		for key, values := range resp.Header {
-			// Skip hop-by-hop headers
-			if key == "Connection" || key == "Transfer-Encoding" {
-				continue
-			}
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
-
-		// Write status code
-		w.WriteHeader(resp.StatusCode)
-
-		// Write response body
-		_, err = w.Write(respBody)
-		if err != nil {
-			g.logger.Error("failed to write response", zap.Error(err))
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
 		}
 	}
 
-	// Log successful completion
-	g.logger.Info("chat completion succeeded",
-		zap.String("request_id", requestID.String()),
-		zap.String("node_id", node.ID.String()),
-		zap.Duration("latency", time.Since(startTime)),
-	)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
@@ -543,7 +501,6 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// Get tenant/env info from context
 	tenantID := ctx.Value("tenant_id").(uuid.UUID)
 	envID := ctx.Value("environment_id").(uuid.UUID)
-	keyInfo := ctx.Value("api_key").(*models.APIKey)
 
 	g.logger.Info("completion request",
 		zap.String("tenant_id", tenantID.String()),
@@ -552,146 +509,53 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		zap.Bool("streaming", req.Stream),
 	)
 
-	// Get environment region preference
-	var envRegion string
-	err = g.db.Pool.QueryRow(ctx, `
-		SELECT region FROM environments
-		WHERE id = $1 AND tenant_id = $2 AND status = 'active'
-	`, envID, tenantID).Scan(&envRegion)
+	// Select best endpoint
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
-		g.logger.Debug("no region preference found", zap.Error(err))
-	}
-
-	// Schedule request to an appropriate node
-	scheduleReq := &scheduler.ScheduleRequest{
-		Model:    req.Model,
-		Region:   envRegion,
-		TenantID: tenantID,
-		EnvID:    envID,
-		Reserved: false,
-	}
-
-	node, err := g.scheduler.ScheduleRequest(ctx, scheduleReq)
-	if err != nil {
-		g.logger.Error("failed to schedule request",
-			zap.Error(err),
-			zap.String("model", req.Model),
-		)
-		g.writeError(w, http.StatusServiceUnavailable, "no available nodes for model")
+		g.logger.Error("failed to select endpoint", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
 		return
 	}
 
-	// Record request start
-	requestID := uuid.New()
-	startTime := time.Now()
-	g.scheduler.TrackRequestStart(node.ID, defaultEstimatedTokens)
-	defer g.scheduler.TrackRequestEnd(node.ID, defaultEstimatedTokens)
-	estimatedTokens := estimateTokens(req.MaxTokens)
-	g.scheduler.TrackRequestStart(node.ID, estimatedTokens)
-	defer g.scheduler.TrackRequestEnd(node.ID, estimatedTokens)
-
-	// Forward request to vLLM node
-	if req.Stream {
-		streamUsage, err := g.vllmProxy.HandleStreaming(ctx, node, r, w, body)
-		if err != nil {
-			vllmProxyErrors.WithLabelValues(node.ID.String(), "streaming_failed").Inc()
-			g.logger.Error("streaming failed",
-				zap.Error(err),
-				zap.String("node_id", node.ID.String()),
-			)
-			return
-		}
-
-		if streamUsage != nil {
-			requestIDStr := requestID.String()
-			g.recordUsage(ctx, models.UsageRecord{
-				ID:               requestID,
-				RequestID:        &requestIDStr,
-				Timestamp:        startTime,
-				TenantID:         tenantID,
-				EnvironmentID:    envID,
-				APIKeyID:         &keyInfo.ID,
-				NodeID:           &node.ID,
-				PromptTokens:     streamUsage.PromptTokens,
-				CompletionTokens: streamUsage.CompletionTokens,
-				TotalTokens:      streamUsage.TotalTokens,
-				LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
-			})
-		}
-	} else {
-		// Handle non-streaming response
-		resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
-		if err != nil {
-			vllmProxyErrors.WithLabelValues(node.ID.String(), "forward_failed").Inc()
-			g.logger.Error("request forwarding failed",
-				zap.Error(err),
-				zap.String("node_id", node.ID.String()),
-			)
-			g.writeError(w, http.StatusBadGateway, "inference request failed")
-			return
-		}
-		defer resp.Body.Close()
-
-		// Read and forward response
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			g.logger.Error("failed to read response body", zap.Error(err))
-			g.writeError(w, http.StatusInternalServerError, "failed to read response")
-			return
-		}
-
-		// Parse response for usage tracking
-		var completionResp map[string]interface{}
-		if err := json.Unmarshal(respBody, &completionResp); err == nil {
-			if usage, ok := completionResp["usage"].(map[string]interface{}); ok {
-				promptTokens := int(getFloat64(usage["prompt_tokens"]))
-				completionTokens := int(getFloat64(usage["completion_tokens"]))
-				totalTokens := int(getFloat64(usage["total_tokens"]))
-
-				// Record usage
-				requestIDStr := requestID.String()
-				g.recordUsage(ctx, models.UsageRecord{
-					ID:               requestID,
-					RequestID:        &requestIDStr,
-					Timestamp:        startTime,
-					TenantID:         tenantID,
-					EnvironmentID:    envID,
-					APIKeyID:         &keyInfo.ID,
-					NodeID:           &node.ID,
-					PromptTokens:     promptTokens,
-					CompletionTokens: completionTokens,
-					TotalTokens:      totalTokens,
-					LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
-				})
-			}
-		}
-
-		// Copy response headers
-		for key, values := range resp.Header {
-			if key == "Connection" || key == "Transfer-Encoding" {
-				continue
-			}
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
-
-		// Write response
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+	if endpoint == "" {
+		g.writeError(w, http.StatusServiceUnavailable, "no healthy nodes for model")
+		return
 	}
 
-	g.logger.Info("completion succeeded",
-		zap.String("request_id", requestID.String()),
-		zap.String("node_id", node.ID.String()),
-		zap.Duration("latency", time.Since(startTime)),
-	)
+	// Proxy request to endpoint
+	// Re-create body reader for proxying
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+	start := time.Now()
+	resp, err := g.proxyRequest(endpoint, r)
+	duration := time.Since(start)
+
+	// Record stats
+	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
+
+	if err != nil {
+		g.logger.Error("failed to proxy request", zap.Error(err))
+		g.writeError(w, http.StatusBadGateway, "failed to proxy request")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Read request body
+	// Read request body for parsing and forwarding
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		g.writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -699,7 +563,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body.Close()
 
-	// Parse request
+	// Parse request for validation
 	var req EmbeddingRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		g.writeError(w, http.StatusBadRequest, "invalid request body")
@@ -707,124 +571,56 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate request
-	if req.Model == "" {
-		g.writeError(w, http.StatusBadRequest, "model is required")
+	if err := req.Validate(); err != nil {
+		g.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Input == "" && len(req.InputArray) == 0 {
-		g.writeError(w, http.StatusBadRequest, "input is required")
-		return
-	}
-
-	// Get tenant/env info from context
-	tenantID := ctx.Value("tenant_id").(uuid.UUID)
-	envID := ctx.Value("environment_id").(uuid.UUID)
-	keyInfo := ctx.Value("api_key").(*models.APIKey)
 
 	g.logger.Info("embedding request",
-		zap.String("tenant_id", tenantID.String()),
-		zap.String("env_id", envID.String()),
 		zap.String("model", req.Model),
 	)
 
-	// Get environment region preference
-	var envRegion string
-	err = g.db.Pool.QueryRow(ctx, `
-		SELECT region FROM environments
-		WHERE id = $1 AND tenant_id = $2 AND status = 'active'
-	`, envID, tenantID).Scan(&envRegion)
+	// Select best endpoint
+	endpoint, err := g.LoadBalancer.SelectEndpoint(ctx, req.Model)
 	if err != nil {
-		g.logger.Debug("no region preference found", zap.Error(err))
-	}
-
-	// Schedule request to an appropriate node
-	scheduleReq := &scheduler.ScheduleRequest{
-		Model:    req.Model,
-		Region:   envRegion,
-		TenantID: tenantID,
-		EnvID:    envID,
-		Reserved: false,
-	}
-
-	node, err := g.scheduler.ScheduleRequest(ctx, scheduleReq)
-	if err != nil {
-		g.logger.Error("failed to schedule request",
-			zap.Error(err),
-			zap.String("model", req.Model),
-		)
-		g.writeError(w, http.StatusServiceUnavailable, "no available nodes for model")
+		g.logger.Error("failed to select endpoint", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to select endpoint")
 		return
 	}
 
-	// Record request start
-	requestID := uuid.New()
-	startTime := time.Now()
+	if endpoint == "" {
+		g.writeError(w, http.StatusServiceUnavailable, "no healthy nodes for model")
+		return
+	}
 
-	// Forward request to vLLM node (embeddings are not streamed)
-	resp, err := g.vllmProxy.ForwardRequest(ctx, node, r, body)
+	// Proxy request to endpoint
+	// Re-create body reader for proxying
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+	start := time.Now()
+	resp, err := g.proxyRequest(endpoint, r)
+	duration := time.Since(start)
+
+	// Record stats
+	isError := err != nil || (resp != nil && resp.StatusCode >= 500)
+	g.LoadBalancer.RecordRequest(endpoint, duration, isError)
+
 	if err != nil {
-		vllmProxyErrors.WithLabelValues(node.ID.String(), "embedding_failed").Inc()
-		g.logger.Error("request forwarding failed",
-			zap.Error(err),
-			zap.String("node_id", node.ID.String()),
-		)
-		g.writeError(w, http.StatusBadGateway, "embedding request failed")
+		g.logger.Error("failed to proxy request", zap.Error(err))
+		g.writeError(w, http.StatusBadGateway, "failed to proxy request")
 		return
 	}
 	defer resp.Body.Close()
 
-	// Read and forward response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		g.logger.Error("failed to read response body", zap.Error(err))
-		g.writeError(w, http.StatusInternalServerError, "failed to read response")
-		return
-	}
-
-	// Parse response for usage tracking
-	var embeddingResp map[string]interface{}
-	if err := json.Unmarshal(respBody, &embeddingResp); err == nil {
-		if usage, ok := embeddingResp["usage"].(map[string]interface{}); ok {
-			promptTokens := int(getFloat64(usage["prompt_tokens"]))
-			totalTokens := int(getFloat64(usage["total_tokens"]))
-
-			// Record usage (no completion tokens for embeddings)
-			requestIDStr := requestID.String()
-			g.recordUsage(ctx, models.UsageRecord{
-				ID:               requestID,
-				RequestID:        &requestIDStr,
-				Timestamp:        startTime,
-				TenantID:         tenantID,
-				EnvironmentID:    envID,
-				APIKeyID:         &keyInfo.ID,
-				NodeID:           &node.ID,
-				PromptTokens:     promptTokens,
-				CompletionTokens: 0,
-				TotalTokens:      totalTokens,
-				LatencyMs:        intPtr(int(time.Since(startTime).Milliseconds())),
-			})
-		}
-	}
-
 	// Copy response headers
 	for key, values := range resp.Header {
-		if key == "Connection" || key == "Transfer-Encoding" {
-			continue
-		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
-	// Write response
 	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
-
-	g.logger.Info("embedding succeeded",
-		zap.String("request_id", requestID.String()),
-		zap.String("node_id", node.ID.String()),
-		zap.Duration("latency", time.Since(startTime)),
-	)
+	io.Copy(w, resp.Body)
 }
 
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -1135,4 +931,45 @@ type EmbeddingRequest struct {
 	Input      string   `json:"input,omitempty"` // Single input string
 	InputArray []string `json:"input,omitempty"` // Array of input strings (OpenAI supports both)
 	User       string   `json:"user,omitempty"`  // Optional user identifier
+}
+
+// Validate checks if the request is valid
+func (r *EmbeddingRequest) Validate() error {
+	if r.Model == "" {
+		return fmt.Errorf("model is required")
+	}
+	if r.Input == "" && len(r.InputArray) == 0 {
+		return fmt.Errorf("input is required")
+	}
+	return nil
+}
+
+func (g *Gateway) proxyRequest(endpoint string, r *http.Request) (*http.Response, error) {
+	// Construct target URL
+	targetURL := endpoint + r.URL.Path
+	if !strings.HasPrefix(endpoint, "http") {
+		targetURL = "http://" + endpoint + r.URL.Path
+	}
+
+	// Create new request
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create proxy request: %w", err)
+	}
+
+	// Copy headers
+	for k, v := range r.Header {
+		proxyReq.Header[k] = v
+	}
+
+	// Execute request
+	client := &http.Client{
+		Timeout: 10 * time.Minute, // Long timeout for LLM generation
+	}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		return nil, fmt.Errorf("proxy request failed: %w", err)
+	}
+
+	return resp, nil
 }
