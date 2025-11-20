@@ -136,6 +136,11 @@ func (g *Gateway) setupRoutes() {
 		r.Get("/admin/api-keys/{tenant_id}", g.handleListAPIKeys)
 		r.Post("/admin/api-keys", g.handleCreateAPIKey)
 		r.Delete("/admin/api-keys/{key_id}", g.handleRevokeAPIKey)
+		
+		// Model and instance management (UI-driven)
+		r.Get("/admin/models/r2", g.ListR2ModelsHandler)
+		r.Post("/admin/instances/launch", g.LaunchModelInstanceHandler)
+		r.Get("/admin/instances/status", g.GetLaunchStatusHandler)
 
 		// Tenant management
 		r.Post("/admin/tenants", g.handleCreateTenant)

@@ -137,12 +137,31 @@ services:
       - crosslogic-network
     restart: unless-stopped
 
+  # Dashboard (Next.js Admin UI)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: crosslogic-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - CROSSLOGIC_API_BASE_URL=http://control-plane:8080
+      - CROSSLOGIC_ADMIN_TOKEN=${ADMIN_API_TOKEN}
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${JWT_SECRET}
+    depends_on:
+      - control-plane
+    networks:
+      - crosslogic-network
+    restart: unless-stopped
+
   # Grafana (optional - for visualization)
   grafana:
     image: grafana/grafana:latest
     container_name: crosslogic-grafana
     ports:
-      - "3000:3000"
+      - "3001:3000"  # Changed to 3001 to avoid conflict with dashboard
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
