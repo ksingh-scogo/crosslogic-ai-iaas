@@ -16,7 +16,7 @@ type Config struct {
 	Security   SecurityConfig
 	Runtime    RuntimeConfig
 	Monitoring MonitoringConfig
-	JuiceFS    JuiceFSConfig
+	R2         R2Config
 }
 
 // ServerConfig holds server configuration
@@ -84,12 +84,13 @@ type MonitoringConfig struct {
 	LogLevel       string
 }
 
-// JuiceFSConfig holds JuiceFS configuration
-type JuiceFSConfig struct {
-	RedisURL  string
-	Bucket    string
-	AccessKey string
-	SecretKey string
+// R2Config holds Cloudflare R2 configuration for model storage
+type R2Config struct {
+	Endpoint  string // R2 endpoint (e.g., https://account-id.r2.cloudflarestorage.com)
+	Bucket    string // Bucket name (e.g., crosslogic-models)
+	AccessKey string // R2 Access Key ID
+	SecretKey string // R2 Secret Access Key
+	CDNDomain string // Optional: Custom CDN domain for cache
 }
 
 // LoadConfig loads configuration from environment variables
@@ -146,11 +147,12 @@ func LoadConfig() (*Config, error) {
 			MetricsPath:    getEnv("METRICS_PATH", "/metrics"),
 			LogLevel:       getEnv("LOG_LEVEL", "info"),
 		},
-		JuiceFS: JuiceFSConfig{
-			RedisURL:  getEnv("JUICEFS_REDIS_URL", ""),
-			Bucket:    getEnv("JUICEFS_BUCKET", ""),
-			AccessKey: getEnv("JUICEFS_ACCESS_KEY", ""),
-			SecretKey: getEnv("JUICEFS_SECRET_KEY", ""),
+		R2: R2Config{
+			Endpoint:  getEnv("R2_ENDPOINT", ""),
+			Bucket:    getEnv("R2_BUCKET", "crosslogic-models"),
+			AccessKey: getEnv("R2_ACCESS_KEY", ""),
+			SecretKey: getEnv("R2_SECRET_KEY", ""),
+			CDNDomain: getEnv("R2_CDN_DOMAIN", ""),
 		},
 	}
 

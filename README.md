@@ -50,6 +50,7 @@ CrossLogic Inference Cloud (CIC) is a complete inference platform that makes LLM
 - ✅ **Spot Instance Management** - Auto-recovery from interruptions
 - ✅ **Health Monitoring** - Real-time node health tracking
 - ✅ **Reserved Capacity** - Guaranteed tokens/sec for enterprises
+- ✅ **Ultra-Fast Model Loading** - Cloudflare R2 + vLLM native S3 streaming (30s vs 10min)
 
 ### Supported Models
 
@@ -116,6 +117,9 @@ Storage Layer:
 - Stripe account (test mode is fine)
 - Hugging Face account/token (to pull open models)
 - GPU access (local CUDA host or any SkyPilot-supported cloud)
+- **[Optional]** Cloudflare R2 account for ultra-fast model loading (see [R2 Setup](docs/R2_SETUP_GUIDE.md))
+
+> **💡 New**: With Cloudflare R2 + vLLM's native S3 support, your GPU instances load models in **~30 seconds** instead of 5-10 minutes, saving **99.9% on bandwidth costs**. See [Setup Guide](docs/R2_SETUP_GUIDE.md).
 
 ### 1. Clone Repository
 
