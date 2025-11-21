@@ -1,6 +1,7 @@
 import { PlugZap, Shield, ArrowUpRight } from "lucide-react";
 import { fetchNodeSummaries, fetchUsageHistory } from "../lib/api";
 import { StatCard } from "../components/cards";
+import DeveloperLogin from "../components/developer-login";
 
 const DEFAULT_TENANT =
   process.env.CROSSLOGIC_DASHBOARD_TENANT_ID ??
@@ -29,6 +30,7 @@ export default async function Home() {
 
   return (
     <div className="page">
+      <DeveloperLogin />
       <div className="page-header">
         <div>
           <div className="eyebrow">Built for engineers</div>

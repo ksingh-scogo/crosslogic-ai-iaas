@@ -10,6 +10,8 @@ declare namespace NodeJS {
     CROSSLOGIC_DASHBOARD_TENANT_ID?: string;
     NEXT_PUBLIC_CONTROL_PLANE_URL?: string;
     NEXT_PUBLIC_ADMIN_TOKEN?: string;
+    ENVIRONMENT?: string;
+    NEXT_PUBLIC_ENVIRONMENT?: string;
   }
 }
 
