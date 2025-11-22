@@ -4,8 +4,9 @@ FROM node:18-alpine AS deps
 WORKDIR /app
 
 # Install dependencies only (cached layer)
+# Note: We install all dependencies (including dev) because Next.js build needs them
 COPY control-plane/dashboard/package.json control-plane/dashboard/package-lock.json ./
-RUN npm ci --only=production --ignore-scripts && \
+RUN npm ci --ignore-scripts && \
     npm cache clean --force
 
 # Build stage
@@ -13,14 +14,22 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 
+# Accept build args for Next.js public env vars
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_ADMIN_TOKEN
+ARG NEXT_PUBLIC_CONTROL_PLANE_URL
+
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy source files
 COPY control-plane/dashboard/ ./
 
-# Build Next.js app
+# Build Next.js app with environment variables
 ENV NEXT_TELEMETRY_DISABLED 1
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_ADMIN_TOKEN=${NEXT_PUBLIC_ADMIN_TOKEN}
+ENV NEXT_PUBLIC_CONTROL_PLANE_URL=${NEXT_PUBLIC_CONTROL_PLANE_URL}
 RUN npm run build
 
 # Production image - minimal runtime

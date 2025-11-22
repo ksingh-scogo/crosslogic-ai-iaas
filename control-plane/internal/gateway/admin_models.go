@@ -3,8 +3,29 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
+)
+
+// Mock launch job tracker for demo purposes
+type LaunchJob struct {
+	JobID       string
+	Status      string
+	Progress    int
+	Stage       string
+	Stages      []string
+	StartTime   time.Time
+	ModelName   string
+	Provider    string
+	Region      string
+}
+
+var (
+	launchJobs = make(map[string]*LaunchJob)
+	jobsMutex  sync.RWMutex
 )
 
 // ListR2ModelsHandler lists all models available in R2 bucket
@@ -102,39 +123,52 @@ func (g *Gateway) LaunchModelInstanceHandler(w http.ResponseWriter, r *http.Requ
 		zap.String("instance_type", req.InstanceType),
 	)
 	
-	// Create launch task using orchestrator
-	nodeConfig := struct {
-		ModelName    string
-		Provider     string
-		Region       string
-		InstanceType string
-		GPU          string
-		GPUCount     int
-		UseSpot      bool
-	}{
-		ModelName:    req.ModelName,
-		Provider:     req.Provider,
-		Region:       req.Region,
-		InstanceType: req.InstanceType,
-		GPU:          req.GPU,
-		GPUCount:     req.GPUCount,
-		UseSpot:      req.UseSpot,
-	}
-	
 	// In production, this would:
 	// 1. Generate SkyPilot YAML
 	// 2. Execute sky launch via subprocess or API
 	// 3. Track launch status
 	// 4. Return job ID for status polling
 	
-	// For now, return mock response
+	// For now, simulate launch with mock job tracking
+	jobID := "launch-" + uuid.New().String()[:8]
+	
+	// Create mock job
+	job := &LaunchJob{
+		JobID:     jobID,
+		Status:    "in_progress",
+		Progress:  0,
+		Stage:     "validating",
+		StartTime: time.Now(),
+		ModelName: req.ModelName,
+		Provider:  req.Provider,
+		Region:    req.Region,
+		Stages: []string{
+			"→ Validating configuration",
+			"  Requesting spot instance",
+			"  Provisioning instance",
+			"  Installing dependencies",
+			"  Loading model from R2",
+			"  Starting vLLM",
+			"  Registering node",
+		},
+	}
+	
+	// Store job
+	jobsMutex.Lock()
+	launchJobs[jobID] = job
+	jobsMutex.Unlock()
+	
+	// Start simulated launch progress in background
+	go simulateLaunchProgress(jobID, g.logger)
+	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "launching",
-		"message": "GPU instance launch initiated",
-		"details": nodeConfig,
-		"job_id":  "launch-" + generateJobID(),
-		"estimated_time": "5-10 minutes",
+		"status":          "launching",
+		"message":         "GPU instance launch initiated",
+		"job_id":          jobID,
+		"model":           req.ModelName,
+		"estimated_time":  "2-3 minutes (simulated)",
+		"note":            "This is a simulated launch for UI testing. Real SkyPilot integration needed for production.",
 	})
 }
 
@@ -149,22 +183,32 @@ func (g *Gateway) GetLaunchStatusHandler(w http.ResponseWriter, r *http.Request)
 	
 	g.logger.Info("checking launch status", zap.String("job_id", jobID))
 	
-	// In production, this would query the actual launch status
-	// For now, return mock status
+	// Get job from mock tracker
+	jobsMutex.RLock()
+	job, exists := launchJobs[jobID]
+	jobsMutex.RUnlock()
+	
+	if !exists {
+		// Job not found - might be old or invalid
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"job_id":  jobID,
+			"status":  "not_found",
+			"message": "Job not found. It may have expired or never existed.",
+		})
+		return
+	}
+	
+	// Return current job status
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"job_id": jobID,
-		"status": "in_progress",
-		"stage":  "provisioning_instance",
-		"progress": 45,
-		"stages": []string{
-			"✓ Validating configuration",
-			"✓ Requesting spot instance",
-			"→ Provisioning instance (45%)",
-			"  Installing dependencies",
-			"  Starting vLLM",
-			"  Registering node",
-		},
+		"job_id":   job.JobID,
+		"status":   job.Status,
+		"stage":    job.Stage,
+		"progress": job.Progress,
+		"stages":   job.Stages,
+		"model":    job.ModelName,
+		"elapsed":  time.Since(job.StartTime).Seconds(),
 	})
 }
 
@@ -196,10 +240,78 @@ func (g *Gateway) detectGPUType(provider, instanceType string) string {
 	return "Unknown"
 }
 
-func generateJobID() string {
-	// Generate unique job ID
-	// In production, use UUID or similar
-	return "abc123xyz"
+// simulateLaunchProgress simulates a GPU instance launch for UI testing
+// In production, this would be replaced with real SkyPilot orchestration
+func simulateLaunchProgress(jobID string, logger *zap.Logger) {
+	stages := []struct {
+		name     string
+		duration time.Duration
+		progress int
+	}{
+		{"validating", 2 * time.Second, 10},
+		{"requesting", 5 * time.Second, 25},
+		{"provisioning", 15 * time.Second, 45},
+		{"installing", 20 * time.Second, 65},
+		{"loading_model", 25 * time.Second, 80},
+		{"starting_vllm", 10 * time.Second, 90},
+		{"registering", 5 * time.Second, 100},
+	}
+	
+	for i, stage := range stages {
+		time.Sleep(stage.duration)
+		
+		jobsMutex.Lock()
+		job, exists := launchJobs[jobID]
+		if !exists {
+			jobsMutex.Unlock()
+			return
+		}
+		
+		job.Progress = stage.progress
+		job.Stage = stage.name
+		
+		// Update stages display
+		stageNames := []string{
+			"Validating configuration",
+			"Requesting spot instance",
+			"Provisioning instance",
+			"Installing dependencies",
+			"Loading model from R2",
+			"Starting vLLM",
+			"Registering node",
+		}
+		
+		updatedStages := make([]string, len(stageNames))
+		for j, name := range stageNames {
+			if j < i {
+				updatedStages[j] = "✓ " + name
+			} else if j == i {
+				updatedStages[j] = "→ " + name
+			} else {
+				updatedStages[j] = "  " + name
+			}
+		}
+		job.Stages = updatedStages
+		
+		if stage.progress >= 100 {
+			job.Status = "completed"
+			job.Stage = "ready"
+			logger.Info("simulated launch completed", 
+				zap.String("job_id", jobID),
+				zap.String("model", job.ModelName),
+			)
+		}
+		
+		jobsMutex.Unlock()
+	}
+	
+	// Clean up job after 5 minutes
+	time.AfterFunc(5*time.Minute, func() {
+		jobsMutex.Lock()
+		delete(launchJobs, jobID)
+		jobsMutex.Unlock()
+		logger.Debug("cleaned up launch job", zap.String("job_id", jobID))
+	})
 }
 
 

@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ApiKey } from "../../lib/api";
-import { createApiKeyAction, revokeApiKeyAction } from "../actions";
+import { ApiKey } from "../lib/api";
+import { createApiKeyAction, revokeApiKeyAction } from "../app/actions";
 import { Trash2, Plus, Copy, Check } from "lucide-react";
 
 export default function ApiKeyManager({ initialKeys }: { initialKeys: ApiKey[] }) {

@@ -84,7 +84,7 @@ HuggingFace Token: hf_________________________________
    ```
 4. **Option B: Create Service Principal** (for production):
    ```bash
-   az ad sp create-for-rbac --name crosslogic-sp --role Contributor
+   az ad sp create-for-rbac --name crosslogic-sp --role Contributor --scopes /subscriptions/5bf6669e-9a6c-4632-bb18-aa2055904028/resourcegroups/crosslogic-ai
    ```
 5. **Save these values**:
 

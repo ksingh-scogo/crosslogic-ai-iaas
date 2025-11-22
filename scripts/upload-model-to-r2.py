@@ -5,6 +5,10 @@ Upload HuggingFace models directly to Cloudflare R2.
 vLLM will stream models from R2 using native S3 support - no JuiceFS needed!
 
 Usage:
+    # Simple (loads credentials from .env file automatically)
+    python upload-model-to-r2.py meta-llama/Llama-3-8B-Instruct
+    
+    # Or override credentials
     python upload-model-to-r2.py meta-llama/Llama-3-8B-Instruct --hf-token YOUR_TOKEN
 """
 
@@ -15,12 +19,47 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Load .env file if it exists
+def load_env_file(env_path):
+    """Load .env file manually if python-dotenv is not available"""
+    if not env_path.exists():
+        return False
+    
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                # Remove quotes if present
+                value = value.strip().strip('"').strip("'")
+                os.environ[key] = value
+    return True
+
+# Try to load .env file
+env_path = Path(__file__).parent.parent / ".env"
+
+try:
+    from dotenv import load_dotenv
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✓ Loaded credentials from {env_path}")
+    else:
+        print(f"⚠️  No .env file found at {env_path}")
+        print(f"   Will use environment variables or command-line arguments")
+except ImportError:
+    # Use fallback parser (works perfectly fine)
+    if load_env_file(env_path):
+        print(f"✓ Loaded credentials from {env_path}")
+    else:
+        print(f"⚠️  No .env file found at {env_path}")
+        print(f"   Will use environment variables or command-line arguments")
+
 try:
     from huggingface_hub import snapshot_download
     from tqdm import tqdm
 except ImportError:
     print("Error: Required packages not found. Install with:")
-    print("  pip install huggingface-hub tqdm")
+    print("  pip install huggingface-hub tqdm python-dotenv")
     sys.exit(1)
 
 
@@ -37,7 +76,6 @@ def upload_model(model_id: str, hf_token: str, r2_endpoint: str, r2_bucket: str)
             repo_id=model_id,
             token=hf_token,
             cache_dir="/tmp/model-cache",
-            resume_download=True,
             ignore_patterns=["*.bin", "*.pt"],  # Skip PyTorch files, prefer safetensors
         )
         print(f"✓ Downloaded to {local_path}")
@@ -114,7 +152,8 @@ def upload_model(model_id: str, hf_token: str, r2_endpoint: str, r2_bucket: str)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Upload HuggingFace models to Cloudflare R2 for fast vLLM loading"
+        description="Upload HuggingFace models to Cloudflare R2 for fast vLLM loading",
+        epilog="Credentials are loaded from .env file automatically if present."
     )
     parser.add_argument(
         "model_id",
@@ -122,8 +161,8 @@ def main():
     )
     parser.add_argument(
         "--hf-token",
-        required=True,
-        help="HuggingFace API token",
+        default=os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN"),
+        help="HuggingFace API token (default: from HUGGINGFACE_TOKEN or HF_TOKEN env var)",
     )
     parser.add_argument(
         "--r2-endpoint",
@@ -135,27 +174,67 @@ def main():
         default=os.getenv("R2_BUCKET", "crosslogic-models"),
         help="R2 bucket name (default: from R2_BUCKET env var or 'crosslogic-models')",
     )
+    parser.add_argument(
+        "--r2-access-key",
+        default=os.getenv("R2_ACCESS_KEY"),
+        help="R2 access key (default: from R2_ACCESS_KEY env var)",
+    )
+    parser.add_argument(
+        "--r2-secret-key",
+        default=os.getenv("R2_SECRET_KEY"),
+        help="R2 secret key (default: from R2_SECRET_KEY env var)",
+    )
     
     args = parser.parse_args()
     
-    # Validate environment
+    # Validate credentials
+    print("\n🔍 Validating credentials...")
+    
+    # HuggingFace token
+    if not args.hf_token:
+        print("\n❌ Error: HuggingFace token not found")
+        print("   Set in .env file: HUGGINGFACE_TOKEN=hf_xxxxx")
+        print("   Or pass: --hf-token hf_xxxxx")
+        sys.exit(1)
+    print("✓ HuggingFace token found")
+    
+    # R2 endpoint
     if not args.r2_endpoint:
-        print("Error: R2_ENDPOINT not set")
-        print("Export it or pass --r2-endpoint:")
-        print("  export R2_ENDPOINT='https://account-id.r2.cloudflarestorage.com'")
+        print("\n❌ Error: R2_ENDPOINT not set")
+        print("   Set in .env file: R2_ENDPOINT=https://account-id.r2.cloudflarestorage.com")
+        print("   Or pass: --r2-endpoint https://...")
+        sys.exit(1)
+    print(f"✓ R2 endpoint: {args.r2_endpoint}")
+    
+    # R2 credentials (check both direct args and AWS env vars)
+    r2_access_key = args.r2_access_key or os.getenv("AWS_ACCESS_KEY_ID")
+    r2_secret_key = args.r2_secret_key or os.getenv("AWS_SECRET_ACCESS_KEY")
+    
+    if not r2_access_key or not r2_secret_key:
+        print("\n❌ Error: R2 credentials not found")
+        print("   Set in .env file:")
+        print("     R2_ACCESS_KEY=your_access_key")
+        print("     R2_SECRET_KEY=your_secret_key")
+        print("   Or set AWS environment variables:")
+        print("     AWS_ACCESS_KEY_ID=your_access_key")
+        print("     AWS_SECRET_ACCESS_KEY=your_secret_key")
         sys.exit(1)
     
-    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
-        print("Error: AWS credentials not set")
-        print("Export them:")
-        print("  export AWS_ACCESS_KEY_ID='your-r2-access-key'")
-        print("  export AWS_SECRET_ACCESS_KEY='your-r2-secret-key'")
-        sys.exit(1)
+    # Set AWS credentials for boto3/awscli
+    os.environ["AWS_ACCESS_KEY_ID"] = r2_access_key
+    os.environ["AWS_SECRET_ACCESS_KEY"] = r2_secret_key
+    print("✓ R2 credentials configured")
+    
+    print(f"✓ R2 bucket: {args.r2_bucket}")
+    print("✓ All credentials validated!\n")
     
     # Check for AWS CLI
-    if subprocess.run(["which", "aws"], capture_output=True).returncode != 0:
-        print("Error: AWS CLI not installed")
-        print("Install it: pip install awscli")
+    try:
+        result = subprocess.run(["aws", "--version"], capture_output=True, text=True)
+        print(f"✓ AWS CLI found: {result.stdout.split()[0]}")
+    except FileNotFoundError:
+        print("\n❌ Error: AWS CLI not installed")
+        print("   Install: pip install awscli")
         sys.exit(1)
     
     upload_model(args.model_id, args.hf_token, args.r2_endpoint, args.r2_bucket)

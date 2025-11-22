@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { NodeSummary, LaunchNodeRequest } from "../../lib/api";
-import { launchNodeAction, terminateNodeAction } from "../actions";
+import { NodeSummary, LaunchNodeRequest } from "../lib/api";
+import { launchNodeAction, terminateNodeAction } from "../app/actions";
 import { Server, Power, Activity, Trash2, Plus } from "lucide-react";
 
 export default function NodeManager({ initialNodes }: { initialNodes: NodeSummary[] }) {

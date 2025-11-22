@@ -2,12 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, KeyRound, Gauge, ArrowUpRight } from "lucide-react";
+import { LayoutDashboard, KeyRound, Gauge, ArrowUpRight, Rocket, Server } from "lucide-react";
 
 const navItems = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/api-keys", label: "API Keys", icon: KeyRound },
-  { href: "/usage", label: "Usage & Billing", icon: Gauge }
+  { href: "/usage", label: "Usage & Billing", icon: Gauge },
+  { href: "/launch", label: "Launch Instance", icon: Rocket },
+  { href: "/admin/nodes", label: "Manage Nodes", icon: Server }
 ];
 
 export default function Sidebar() {

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # Install build dependencies (cached layer)
 RUN apk add --no-cache git make
@@ -14,10 +14,19 @@ RUN go mod download
 COPY control-plane/ ./
 
 # Build optimized binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -a -installsuffix cgo \
+# Create temp directories and use them for build cache to avoid disk space issues
+# Build for the target platform (defaults to arm64 for Apple Silicon, can be overridden)
+# Build to /tmp first to avoid conflict with control-plane directory, then move to /app
+ARG TARGETARCH=arm64
+ARG TARGETOS=linux
+RUN mkdir -p /tmp/go-cache /tmp/go-tmp && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    GOCACHE=/tmp/go-cache \
+    GOTMPDIR=/tmp/go-tmp \
+    go build -installsuffix cgo \
     -ldflags='-w -s -extldflags "-static"' \
-    -o control-plane ./cmd/server/main.go
+    -o /tmp/control-plane-bin ./cmd/server/main.go && \
+    mv /tmp/control-plane-bin /app/control-plane-bin
 
 # Runtime stage - distroless for minimal size and security
 FROM alpine:3.19
@@ -36,7 +45,9 @@ RUN addgroup -g 1000 crosslogic && \
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder --chown=crosslogic:crosslogic /app/control-plane .
+# The build creates 'control-plane-bin' binary (to avoid conflict with directory)
+COPY --from=builder --chown=crosslogic:crosslogic /app/control-plane-bin ./control-plane
+RUN chmod +x ./control-plane
 
 # Switch to non-root user
 USER crosslogic

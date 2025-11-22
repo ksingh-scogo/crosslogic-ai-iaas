@@ -165,20 +165,38 @@ open http://localhost:3000
 ### Step 5: Upload Models to R2 (30 minutes - one time only)
 
 ```bash
-# For this step only, you need Python locally
-pip3 install awscli huggingface-hub
+# Install Python dependencies (one time)
+pip3 install awscli huggingface-hub python-dotenv tqdm
 
-# Set credentials
-export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY
-export AWS_SECRET_ACCESS_KEY=$R2_SECRET_KEY
+# Upload Mistral 7B (credentials loaded from .env automatically!)
+python3 scripts/upload-model-to-r2.py mistralai/Mistral-7B-Instruct-v0.3
 
-# Upload Mistral 7B
-python3 scripts/upload-model-to-r2.py \
-  mistralai/Mistral-7B-Instruct-v0.3 \
-  --hf-token $HUGGINGFACE_TOKEN
+# That's it! The script will:
+# ✓ Load R2_ENDPOINT from .env
+# ✓ Load R2_ACCESS_KEY & R2_SECRET_KEY from .env
+# ✓ Load HUGGINGFACE_TOKEN from .env
+# ✓ Download model in safetensors format
+# ✓ Upload to R2
+# ✓ Verify upload
 
-# This takes 20-30 minutes, run in background:
-# nohup python3 scripts/upload-model-to-r2.py ... &
+# Upload takes 20-30 minutes, you can run in background:
+nohup python3 scripts/upload-model-to-r2.py mistralai/Mistral-7B-Instruct-v0.3 > upload.log 2>&1 &
+
+# Monitor progress:
+tail -f upload.log
+```
+
+**Alternative models to upload:**
+
+```bash
+# Llama 3 8B (~16GB, recommended for testing)
+python3 scripts/upload-model-to-r2.py meta-llama/Meta-Llama-3-8B-Instruct
+
+# Mistral 7B (~14GB)
+python3 scripts/upload-model-to-r2.py mistralai/Mistral-7B-Instruct-v0.3
+
+# Qwen 7B (~14GB)
+python3 scripts/upload-model-to-r2.py Qwen/Qwen2.5-7B-Instruct
 ```
 
 ---

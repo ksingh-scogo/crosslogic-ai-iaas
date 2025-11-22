@@ -53,47 +53,6 @@ var (
 		[]string{"service"},
 	)
 
-	// Phase 3: Cost Metrics
-	tenantCostTotal = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "tenant_cost_total_usd",
-			Help: "Total cost per tenant in USD",
-		},
-		[]string{"tenant_id"},
-	)
-
-	tenantCostCompute = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "tenant_cost_compute_usd",
-			Help: "Compute cost per tenant in USD",
-		},
-		[]string{"tenant_id"},
-	)
-
-	tenantCostToken = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "tenant_cost_token_usd",
-			Help: "Token cost per tenant in USD",
-		},
-		[]string{"tenant_id"},
-	)
-
-	tenantSavings = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "tenant_savings_usd",
-			Help: "Savings from spot instances per tenant in USD",
-		},
-		[]string{"tenant_id"},
-	)
-
-	spotUsagePercent = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "spot_usage_percent",
-			Help: "Percentage of compute running on spot instances",
-		},
-		[]string{"tenant_id"},
-	)
-
 	// Phase 3: Performance Metrics
 	modelLoadingTime = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -110,22 +69,6 @@ var (
 			Help: "JuiceFS cache hit rate (0-1)",
 		},
 		[]string{"model_name"},
-	)
-
-	queueDepth = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "vllm_queue_depth",
-			Help: "Number of requests waiting in vLLM queue",
-		},
-		[]string{"node_id", "model_name"},
-	)
-
-	activeRequests = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "vllm_active_requests",
-			Help: "Number of requests currently being processed",
-		},
-		[]string{"node_id", "model_name"},
 	)
 
 	inferenceLatency = promauto.NewHistogramVec(
@@ -232,15 +175,6 @@ func (g *Gateway) registerMetrics() {
 
 // Phase 3: Metric Helper Functions
 
-// UpdateCostMetrics updates cost metrics for a tenant
-func UpdateCostMetrics(tenantID string, totalCost, computeCost, tokenCost, savings, spotPercent float64) {
-	tenantCostTotal.WithLabelValues(tenantID).Set(totalCost)
-	tenantCostCompute.WithLabelValues(tenantID).Set(computeCost)
-	tenantCostToken.WithLabelValues(tenantID).Set(tokenCost)
-	tenantSavings.WithLabelValues(tenantID).Set(savings)
-	spotUsagePercent.WithLabelValues(tenantID).Set(spotPercent)
-}
-
 // RecordModelLoadingTime records how long it took to load a model
 func RecordModelLoadingTime(modelName string, duration float64, cacheHit bool) {
 	cacheStatus := "false"
@@ -253,12 +187,6 @@ func RecordModelLoadingTime(modelName string, duration float64, cacheHit bool) {
 // UpdateCacheHitRate updates the cache hit rate for a model
 func UpdateCacheHitRate(modelName string, hitRate float64) {
 	cacheHitRate.WithLabelValues(modelName).Set(hitRate)
-}
-
-// UpdateQueueMetrics updates queue depth and active requests
-func UpdateQueueMetrics(nodeID, modelName string, depth, active int64) {
-	queueDepth.WithLabelValues(nodeID, modelName).Set(float64(depth))
-	activeRequests.WithLabelValues(nodeID, modelName).Set(float64(active))
 }
 
 // RecordInferenceLatency records end-to-end inference latency
