@@ -25,11 +25,12 @@ except ImportError:
 
 
 def upload_model(model_id: str, hf_token: str, r2_endpoint: str, r2_bucket: str):
-    """Upload model from HuggingFace to R2"""
+    """Upload model from HuggingFace to R2 in safetensors format for Run:ai Streamer"""
     
-    print(f"\n🚀 Uploading {model_id} to Cloudflare R2\n")
+    print(f"\n🚀 Uploading {model_id} to Cloudflare R2")
+    print("   Format: safetensors (required for Run:ai Model Streamer)\n")
     
-    # Step 1: Download from HuggingFace
+    # Step 1: Download from HuggingFace (prefer safetensors format)
     print(f"📥 Downloading from HuggingFace...")
     try:
         local_path = snapshot_download(
@@ -37,11 +38,24 @@ def upload_model(model_id: str, hf_token: str, r2_endpoint: str, r2_bucket: str)
             token=hf_token,
             cache_dir="/tmp/model-cache",
             resume_download=True,
+            ignore_patterns=["*.bin", "*.pt"],  # Skip PyTorch files, prefer safetensors
         )
         print(f"✓ Downloaded to {local_path}")
     except Exception as e:
         print(f"✗ Download failed: {e}")
         sys.exit(1)
+    
+    # Step 1.5: Verify safetensors format (required for Run:ai Streamer)
+    print(f"\n🔍 Verifying safetensors format...")
+    safetensors_files = list(Path(local_path).glob("*.safetensors"))
+    if not safetensors_files:
+        print(f"⚠️  WARNING: No safetensors files found!")
+        print(f"   Run:ai Streamer requires models in safetensors format.")
+        print(f"   This model may not work with Run:ai Streamer.")
+        print(f"   Continuing upload anyway...")
+    else:
+        print(f"✓ Found {len(safetensors_files)} safetensors files")
+        print(f"  Compatible with Run:ai Model Streamer for ultra-fast loading")
     
     # Step 2: Calculate size
     total_size = sum(f.stat().st_size for f in Path(local_path).rglob("*") if f.is_file())
@@ -82,16 +96,20 @@ def upload_model(model_id: str, hf_token: str, r2_endpoint: str, r2_bucket: str)
     
     # Step 5: Show usage
     print(f"\n✅ Model uploaded successfully!")
-    print(f"\n📝 Usage in vLLM:")
+    print(f"\n📝 Usage in vLLM with Run:ai Streamer:")
     print(f"  python -m vllm.entrypoints.openai.api_server \\")
-    print(f"    --model s3://{r2_bucket}/{model_id}")
+    print(f"    --model s3://{r2_bucket}/{model_id} \\")
+    print(f"    --load-format runai_streamer \\")
+    print(f"    --model-loader-extra-config '{{\"concurrency\": 32}}'")
     print(f"\n📝 Or use in CrossLogic control plane:")
     print(f"  Model name: {model_id}")
-    print(f"  vLLM will automatically stream from R2")
-    print(f"\n⚡ Performance:")
-    print(f"  - First load: ~30-60s (stream from R2 + cache)")
-    print(f"  - Subsequent loads: ~5-10s (local HF cache)")
-    print(f"  - Compare to: 5-10 minutes (direct HuggingFace download)")
+    print(f"  vLLM will automatically stream from R2 with Run:ai Streamer")
+    print(f"\n⚡ Performance with Run:ai Streamer:")
+    print(f"  - First load: ~4-23s (ultra-fast parallel streaming)")
+    print(f"  - Standard S3: ~30-60s (5-10x slower)")
+    print(f"  - HuggingFace: ~5-10 minutes (50-180x slower)")
+    print(f"\n💡 Tip: Run:ai Streamer streams directly to GPU memory")
+    print(f"   No disk caching needed - maximum performance!")
 
 
 def main():
