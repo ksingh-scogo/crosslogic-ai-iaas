@@ -148,30 +148,31 @@ services:
       - crosslogic-network
     restart: unless-stopped
 
-  # Dashboard (Next.js Admin UI)
+  # Dashboard (Vite + React Admin UI)
   dashboard:
     build:
       context: .
       dockerfile: Dockerfile.dashboard
       args:
-        - NEXT_PUBLIC_API_URL=http://localhost:8080
-        - NEXT_PUBLIC_ADMIN_TOKEN=${ADMIN_API_TOKEN}
+        - VITE_API_BASE_URL=http://localhost:8080
+        - VITE_ADMIN_TOKEN=${ADMIN_API_TOKEN}
     container_name: crosslogic-dashboard
     ports:
-      - "3000:3000"
+      - "3000:80"
     environment:
-      - CROSSLOGIC_API_BASE_URL=http://control-plane:8080
-      - CROSSLOGIC_ADMIN_TOKEN=${ADMIN_API_TOKEN}
-      - NEXT_PUBLIC_API_URL=http://localhost:8080
-      - NEXT_PUBLIC_ADMIN_TOKEN=${ADMIN_API_TOKEN}
-      - NEXT_PUBLIC_CONTROL_PLANE_URL=http://localhost:8080
-      - NEXTAUTH_URL=http://localhost:3000
-      - NEXTAUTH_SECRET=${JWT_SECRET}
+      - VITE_API_BASE_URL=http://control-plane:8080
+      - VITE_ADMIN_TOKEN=${ADMIN_API_TOKEN}
     depends_on:
       - control-plane
     networks:
       - crosslogic-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   # Grafana (optional - for visualization)
   grafana:
