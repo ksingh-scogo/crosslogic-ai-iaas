@@ -24,9 +24,9 @@ type Deployment struct {
 	MaxReplicas     int
 	CurrentReplicas int
 	Strategy        string
-	Provider        string
-	Region          string
-	GPUType         string
+	Provider        *string // Nullable
+	Region          *string // Nullable
+	GPUType         *string // Nullable
 }
 
 // DeploymentController manages the lifecycle of deployments and auto-scaling.
@@ -219,19 +219,32 @@ func (c *DeploymentController) updateCurrentReplicas(ctx context.Context, deploy
 
 func (c *DeploymentController) scaleUp(ctx context.Context, d Deployment, count int) error {
 	// Generate optimal config if GPU type is "auto"
-	gpuType := d.GPUType
+	gpuType := ""
+	if d.GPUType != nil {
+		gpuType = *d.GPUType
+	}
 	gpuCount := 1
 	if gpuType == "auto" || gpuType == "" {
 		generator := NewModelConfigGenerator()
 		gpuType, gpuCount, _ = generator.GetOptimalConfig(d.ModelName)
 	}
 
+	// Get provider and region (may be empty for auto-selection)
+	provider := ""
+	region := ""
+	if d.Provider != nil {
+		provider = *d.Provider
+	}
+	if d.Region != nil {
+		region = *d.Region
+	}
+
 	// Launch nodes
 	for i := 0; i < count; i++ {
 		config := NodeConfig{
 			NodeID:       uuid.New().String(),
-			Provider:     d.Provider,
-			Region:       d.Region,
+			Provider:     provider,
+			Region:       region,
 			GPU:          gpuType,
 			GPUCount:     gpuCount,
 			Model:        d.ModelName,

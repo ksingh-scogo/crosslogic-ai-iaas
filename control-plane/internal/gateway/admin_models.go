@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/crosslogic/control-plane/internal/orchestrator"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -123,16 +126,144 @@ func (g *Gateway) LaunchModelInstanceHandler(w http.ResponseWriter, r *http.Requ
 		zap.String("instance_type", req.InstanceType),
 	)
 	
-	// In production, this would:
-	// 1. Generate SkyPilot YAML
-	// 2. Execute sky launch via subprocess or API
-	// 3. Track launch status
-	// 4. Return job ID for status polling
+	// Check if orchestrator is available for real launches
+	if g.orchestrator != nil {
+		// REAL LAUNCH using SkyPilot orchestrator
+		nodeID := uuid.New().String()
+		
+		// Create node configuration for SkyPilot
+		nodeConfig := orchestrator.NodeConfig{
+			NodeID:       nodeID,
+			Provider:     req.Provider,
+			Region:       req.Region,
+			GPU:          req.GPU,
+			GPUCount:     req.GPUCount,
+			Model:        req.ModelName,
+			UseSpot:      req.UseSpot,
+			DiskSize:     256, // Default 256GB
+			VLLMArgs:     "",  // Optional custom args
+		}
+		
+		// Launch node asynchronously
+		jobID := "launch-" + nodeID[:8]
+		
+		// Create job tracker for UI status
+		job := &LaunchJob{
+			JobID:     jobID,
+			Status:    "in_progress",
+			Progress:  0,
+			Stage:     "validating",
+			StartTime: time.Now(),
+			ModelName: req.ModelName,
+			Provider:  req.Provider,
+			Region:    req.Region,
+			Stages: []string{
+				"→ Validating configuration",
+				"  Provisioning cloud resources",
+				"  Installing dependencies",
+				"  Loading model from R2",
+				"  Starting vLLM",
+				"  Registering node",
+			},
+		}
+		
+		jobsMutex.Lock()
+		launchJobs[jobID] = job
+		jobsMutex.Unlock()
+		
+		// Launch in background
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			
+			clusterName, err := g.orchestrator.LaunchNode(ctx, nodeConfig)
+			
+			jobsMutex.Lock()
+			defer jobsMutex.Unlock()
+			
+			if err != nil {
+				g.logger.Error("failed to launch node",
+					zap.Error(err),
+					zap.String("job_id", jobID),
+				)
+
+				if job, exists := launchJobs[jobID]; exists {
+					job.Status = "failed"
+					job.Stage = "error"
+
+					// Parse SkyPilot error for better user feedback
+					errorMsg := err.Error()
+					stages := []string{"✗ Launch failed"}
+
+					// Check for common error patterns
+					if containsString(errorMsg, "Failed to acquire resources in all zones") {
+						stages = append(stages,
+							"  → SkyPilot tried all availability zones in " + nodeConfig.Region,
+							"  → No spot capacity available in any zone",
+							"",
+							"💡 Suggestions:",
+							"  • Try a different region (westus2, centralindia, southindia)",
+							"  • Use on-demand instead of spot (uncheck 'Use Spot')",
+							"  • Wait 10-15 minutes and retry (capacity changes frequently)",
+						)
+					} else if containsString(errorMsg, "ResourcesUnavailableError") {
+						stages = append(stages,
+							"  → Cloud provider has no capacity for this GPU type",
+							"  → Region: " + nodeConfig.Region,
+							"  → GPU: " + nodeConfig.GPU,
+							"",
+							"💡 Try different region or GPU type",
+						)
+					} else {
+						// Generic error - show full message
+						stages = append(stages, "  → " + errorMsg)
+					}
+
+					job.Stages = stages
+				}
+				return
+			}
+			
+			g.logger.Info("node launched successfully",
+				zap.String("cluster_name", clusterName),
+				zap.String("job_id", jobID),
+			)
+			
+			// Update job to completed
+			if job, exists := launchJobs[jobID]; exists {
+				job.Status = "completed"
+				job.Progress = 100
+				job.Stage = "ready"
+				job.Stages = []string{
+					"✓ Validated configuration",
+					"✓ Provisioned cloud resources",
+					"✓ Installed dependencies",
+					"✓ Loaded model from R2",
+					"✓ Started vLLM",
+					"✓ Node registered: " + clusterName,
+				}
+			}
+		}()
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":         "launching",
+			"message":        "Real GPU instance launch initiated via SkyPilot",
+			"job_id":         jobID,
+			"node_id":        nodeID,
+			"model":          req.ModelName,
+			"provider":       req.Provider,
+			"region":         req.Region,
+			"estimated_time": "3-5 minutes",
+		})
+		return
+	}
 	
-	// For now, simulate launch with mock job tracking
+	// FALLBACK: Mock launch for testing when orchestrator not available
+	g.logger.Warn("orchestrator not available, using mock launch simulation")
+	
 	jobID := "launch-" + uuid.New().String()[:8]
 	
-	// Create mock job
 	job := &LaunchJob{
 		JobID:     jobID,
 		Status:    "in_progress",
@@ -153,18 +284,16 @@ func (g *Gateway) LaunchModelInstanceHandler(w http.ResponseWriter, r *http.Requ
 		},
 	}
 	
-	// Store job
 	jobsMutex.Lock()
 	launchJobs[jobID] = job
 	jobsMutex.Unlock()
 	
-	// Start simulated launch progress in background
 	go simulateLaunchProgress(jobID, g.logger)
 	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":          "launching",
-		"message":         "GPU instance launch initiated",
+		"message":         "GPU instance launch initiated (SIMULATION)",
 		"job_id":          jobID,
 		"model":           req.ModelName,
 		"estimated_time":  "2-3 minutes (simulated)",
@@ -215,29 +344,82 @@ func (g *Gateway) GetLaunchStatusHandler(w http.ResponseWriter, r *http.Request)
 // Helper functions
 func (g *Gateway) detectGPUType(provider, instanceType string) string {
 	// Auto-detect GPU based on instance type
-	gpuMap := map[string]string{
-		// AWS
-		"g4dn":  "T4",
-		"g5":    "A10G",
-		"p3":    "V100",
-		"p4":    "A100",
-		// Azure
-		"Standard_NC": "K80",
-		"Standard_ND": "P40",
-		"Standard_NV": "M60",
-		"Standard_NV36ads_A10": "A10",
-		// GCP
-		"n1-standard": "T4",
-		"a2-highgpu":  "A100",
+	// IMPORTANT: Check longer prefixes first to avoid false matches
+	// (e.g., "Standard_NV36ads_A10" must be checked before "Standard_NV")
+
+	// Azure - order matters! Longer prefixes first
+	azurePrefixes := []struct {
+		prefix string
+		gpu    string
+	}{
+		{"Standard_NV36ads_A10", "A10"},  // Check this before "Standard_NV"
+		{"Standard_NV72ads_A10", "A10"},  // A10 variant with 2 GPUs
+		{"Standard_NC", "K80"},
+		{"Standard_ND", "P40"},
+		{"Standard_NV", "M60"},  // Generic NV series (last)
 	}
-	
-	for prefix, gpu := range gpuMap {
-		if len(instanceType) >= len(prefix) && instanceType[:len(prefix)] == prefix {
-			return gpu
+
+	// AWS
+	awsPrefixes := []struct {
+		prefix string
+		gpu    string
+	}{
+		{"g5", "A10G"},
+		{"g4dn", "T4"},
+		{"p4", "A100"},
+		{"p3", "V100"},
+	}
+
+	// GCP
+	gcpPrefixes := []struct {
+		prefix string
+		gpu    string
+	}{
+		{"a2-highgpu", "A100"},
+		{"n1-standard", "T4"},
+	}
+
+	// Select prefix list based on provider
+	var prefixes []struct {
+		prefix string
+		gpu    string
+	}
+
+	switch provider {
+	case "azure":
+		prefixes = azurePrefixes
+	case "aws":
+		prefixes = awsPrefixes
+	case "gcp":
+		prefixes = gcpPrefixes
+	default:
+		// Try all if provider unknown
+		prefixes = append(azurePrefixes, awsPrefixes...)
+		prefixes = append(prefixes, gcpPrefixes...)
+	}
+
+	// Check prefixes in order (longer ones first for Azure)
+	for _, p := range prefixes {
+		if len(instanceType) >= len(p.prefix) && instanceType[:len(p.prefix)] == p.prefix {
+			g.logger.Debug("detected GPU type",
+				zap.String("instance_type", instanceType),
+				zap.String("prefix_matched", p.prefix),
+				zap.String("gpu", p.gpu),
+			)
+			return p.gpu
 		}
 	}
-	
+
+	g.logger.Warn("unknown GPU type for instance",
+		zap.String("instance_type", instanceType),
+		zap.String("provider", provider),
+	)
 	return "Unknown"
+}
+
+// containsString checks if a string contains a substring
+func containsString(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 // simulateLaunchProgress simulates a GPU instance launch for UI testing

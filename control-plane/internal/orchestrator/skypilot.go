@@ -185,8 +185,7 @@ resources:
   accelerators: {{.GPU}}:{{.GPUCount}}
   {{if .Provider}}cloud: {{.Provider}}{{end}}
   {{if .Region}}region: {{.Region}}{{end}}
-  {{if .UseSpot}}use_spot: true
-  spot_recovery: true{{else}}use_spot: false{{end}}
+  {{if .UseSpot}}use_spot: true{{else}}use_spot: false{{end}}
   disk_size: {{.DiskSize}}
   disk_tier: best
 

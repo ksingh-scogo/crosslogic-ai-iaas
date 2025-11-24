@@ -115,6 +115,12 @@ services:
 
       # Notifications (disabled for local dev - set NOTIFICATIONS_ENABLED=true and configure channels to enable)
       - NOTIFICATIONS_ENABLED=false
+      
+      # Azure credentials for SkyPilot (for real GPU instance launches)
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
     depends_on:
       postgres:
         condition: service_healthy

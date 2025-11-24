@@ -28,24 +28,36 @@ RUN mkdir -p /tmp/go-cache /tmp/go-tmp && \
     -o /tmp/control-plane-bin ./cmd/server/main.go && \
     mv /tmp/control-plane-bin /app/control-plane-bin
 
-# Runtime stage - distroless for minimal size and security
-FROM alpine:3.19
+# Runtime stage - need Python for SkyPilot
+FROM python:3.10-slim
 
-# Install only essential runtime dependencies
-RUN apk --no-cache add \
+# Install system dependencies (including rsync for SkyPilot)
+RUN apt-get update && apt-get install -y \
     ca-certificates \
     wget \
-    tzdata \
-    && rm -rf /var/cache/apk/*
+    curl \
+    git \
+    ssh \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install SkyPilot with AWS and Azure support
+RUN pip install --no-cache-dir \
+    "skypilot[aws,azure]==0.6.1" \
+    azure-cli \
+    && sky check
 
 # Create non-root user for security
-RUN addgroup -g 1000 crosslogic && \
-    adduser -D -u 1000 -G crosslogic crosslogic
+RUN groupadd -g 1000 crosslogic && \
+    useradd -m -u 1000 -g crosslogic crosslogic
+
+# Create directories for SkyPilot
+RUN mkdir -p /home/crosslogic/.sky && \
+    chown -R crosslogic:crosslogic /home/crosslogic
 
 WORKDIR /app
 
 # Copy binary from builder
-# The build creates 'control-plane-bin' binary (to avoid conflict with directory)
 COPY --from=builder --chown=crosslogic:crosslogic /app/control-plane-bin ./control-plane
 RUN chmod +x ./control-plane
 
