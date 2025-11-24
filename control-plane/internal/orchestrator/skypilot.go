@@ -438,12 +438,13 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 	)
 
 	// Launch with SkyPilot
+	// Note: Do NOT use --down flag as it terminates the cluster after job completion
+	// We want the vLLM server to keep running for inference requests
 	cmd := exec.CommandContext(ctx, "sky", "launch",
 		"-c", clusterName, // Cluster name
-		taskFile,       // Task file
-		"-y",           // Auto-confirm
-		"--down",       // Terminate on job completion
-		"--detach-run", // Detach after launch
+		taskFile,          // Task file
+		"-y",              // Auto-confirm
+		"--detach-run",    // Detach after launch (returns immediately)
 	)
 
 	// Capture output for debugging

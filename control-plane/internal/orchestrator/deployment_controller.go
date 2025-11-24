@@ -104,6 +104,7 @@ func (c *DeploymentController) getAllDeployments(ctx context.Context) ([]Deploym
 	query := `
 		SELECT id, name, model_name, min_replicas, max_replicas, current_replicas, strategy, provider, region, gpu_type
 		FROM deployments
+		WHERE status = 'active'
 	`
 	rows, err := c.db.Pool.Query(ctx, query)
 	if err != nil {
@@ -127,6 +128,24 @@ func (c *DeploymentController) getAllDeployments(ctx context.Context) ([]Deploym
 }
 
 func (c *DeploymentController) reconcileDeployment(ctx context.Context, d Deployment) error {
+	// Skip deployments that are not active
+	if d.Strategy != "spread" && d.Strategy != "packed" {
+		c.logger.Debug("skipping deployment with invalid strategy",
+			zap.String("name", d.Name),
+			zap.String("strategy", d.Strategy),
+		)
+		return nil
+	}
+
+	// Validate deployment configuration before attempting to scale
+	if err := c.validateDeploymentConfig(d); err != nil {
+		c.logger.Warn("skipping deployment with invalid configuration",
+			zap.String("name", d.Name),
+			zap.Error(err),
+		)
+		return nil
+	}
+
 	// Count active nodes for this deployment
 	activeNodes, err := c.countActiveNodes(ctx, d.ID)
 	if err != nil {
@@ -170,6 +189,29 @@ func (c *DeploymentController) reconcileDeployment(ctx context.Context, d Deploy
 	// Scale Up based on metrics (Latency)
 	if err := c.checkScalingMetrics(ctx, d, activeNodes); err != nil {
 		c.logger.Error("failed to check scaling metrics", zap.Error(err))
+	}
+
+	return nil
+}
+
+// validateDeploymentConfig validates that a deployment has the necessary configuration
+// for launching nodes. Returns error if configuration is invalid.
+func (c *DeploymentController) validateDeploymentConfig(d Deployment) error {
+	// For auto GPU selection, we need at least a model name (provider/region can be auto-selected)
+	// For specific GPU types, we need provider and region
+	if d.GPUType != nil && *d.GPUType != "auto" && *d.GPUType != "" {
+		// Specific GPU type requires provider and region
+		if d.Provider == nil || *d.Provider == "" {
+			return fmt.Errorf("provider is required when using specific GPU type")
+		}
+		if d.Region == nil || *d.Region == "" {
+			return fmt.Errorf("region is required when using specific GPU type")
+		}
+	}
+
+	// Model name is always required
+	if d.ModelName == "" {
+		return fmt.Errorf("model name is required")
 	}
 
 	return nil

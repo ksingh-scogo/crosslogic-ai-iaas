@@ -1,19 +1,14 @@
--- Regions and Instance Types Schema
--- This schema stores cloud provider regions and their available GPU instance types
+-- Regions and Instance Types Schema (Compatible with existing schema)
+-- This adds instance types and updates regions to support cloud provider filtering
 
--- Cloud Regions Table
-CREATE TABLE IF NOT EXISTS regions (
-    id SERIAL PRIMARY KEY,
-    provider VARCHAR(50) NOT NULL, -- 'azure', 'aws', 'gcp'
-    region_code VARCHAR(50) NOT NULL, -- e.g., 'eastus', 'us-west-2', 'us-central1'
-    region_name VARCHAR(100) NOT NULL, -- e.g., 'East US', 'US West (Oregon)', 'Iowa'
-    location VARCHAR(100), -- e.g., 'Virginia, US', 'Oregon, US'
-    is_available BOOLEAN DEFAULT true,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    UNIQUE(provider, region_code)
-);
+-- Add provider column to existing regions table if not exists
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'regions' AND column_name = 'provider') THEN
+        ALTER TABLE regions ADD COLUMN provider VARCHAR(50);
+    END IF;
+END $$;
 
 -- GPU Instance Types Table
 CREATE TABLE IF NOT EXISTS instance_types (
@@ -47,69 +42,30 @@ CREATE TABLE IF NOT EXISTS instance_types (
     UNIQUE(provider, instance_type)
 );
 
--- Region-Instance Type Mapping (which instances are available in which regions)
+-- Region-Instance Type Mapping (using existing regions UUID)
 CREATE TABLE IF NOT EXISTS region_instance_availability (
     id SERIAL PRIMARY KEY,
-    region_id INTEGER NOT NULL REFERENCES regions(id) ON DELETE CASCADE,
+    region_code VARCHAR(50) NOT NULL, -- Link by region code instead of UUID
     instance_type_id INTEGER NOT NULL REFERENCES instance_types(id) ON DELETE CASCADE,
     is_available BOOLEAN DEFAULT true,
     stock_status VARCHAR(50) DEFAULT 'available', -- 'available', 'limited', 'out_of_stock'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    UNIQUE(region_id, instance_type_id)
+    UNIQUE(region_code, instance_type_id)
 );
 
 -- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_regions_provider ON regions(provider);
-CREATE INDEX IF NOT EXISTS idx_regions_available ON regions(is_available);
 CREATE INDEX IF NOT EXISTS idx_instance_types_provider ON instance_types(provider);
 CREATE INDEX IF NOT EXISTS idx_instance_types_gpu_model ON instance_types(gpu_model);
 CREATE INDEX IF NOT EXISTS idx_instance_types_available ON instance_types(is_available);
-CREATE INDEX IF NOT EXISTS idx_region_instance_region_id ON region_instance_availability(region_id);
+CREATE INDEX IF NOT EXISTS idx_region_instance_region_code ON region_instance_availability(region_code);
 CREATE INDEX IF NOT EXISTS idx_region_instance_instance_type_id ON region_instance_availability(instance_type_id);
 
--- Insert Azure Regions
-INSERT INTO regions (provider, region_code, region_name, location) VALUES
-('azure', 'eastus', 'East US', 'Virginia, US'),
-('azure', 'eastus2', 'East US 2', 'Virginia, US'),
-('azure', 'westus', 'West US', 'California, US'),
-('azure', 'westus2', 'West US 2', 'Washington, US'),
-('azure', 'centralus', 'Central US', 'Iowa, US'),
-('azure', 'northcentralus', 'North Central US', 'Illinois, US'),
-('azure', 'southcentralus', 'South Central US', 'Texas, US'),
-('azure', 'westeurope', 'West Europe', 'Netherlands'),
-('azure', 'northeurope', 'North Europe', 'Ireland'),
-('azure', 'southeastasia', 'Southeast Asia', 'Singapore'),
-('azure', 'japaneast', 'Japan East', 'Tokyo, Japan'),
-('azure', 'australiaeast', 'Australia East', 'New South Wales, Australia')
-ON CONFLICT (provider, region_code) DO NOTHING;
-
--- Insert AWS Regions
-INSERT INTO regions (provider, region_code, region_name, location) VALUES
-('aws', 'us-east-1', 'US East (N. Virginia)', 'Virginia, US'),
-('aws', 'us-east-2', 'US East (Ohio)', 'Ohio, US'),
-('aws', 'us-west-1', 'US West (N. California)', 'California, US'),
-('aws', 'us-west-2', 'US West (Oregon)', 'Oregon, US'),
-('aws', 'eu-west-1', 'EU (Ireland)', 'Ireland'),
-('aws', 'eu-central-1', 'EU (Frankfurt)', 'Germany'),
-('aws', 'ap-southeast-1', 'Asia Pacific (Singapore)', 'Singapore'),
-('aws', 'ap-northeast-1', 'Asia Pacific (Tokyo)', 'Japan'),
-('aws', 'ap-southeast-2', 'Asia Pacific (Sydney)', 'Australia')
-ON CONFLICT (provider, region_code) DO NOTHING;
-
--- Insert GCP Regions
-INSERT INTO regions (provider, region_code, region_name, location) VALUES
-('gcp', 'us-central1', 'Iowa', 'Iowa, US'),
-('gcp', 'us-east1', 'South Carolina', 'South Carolina, US'),
-('gcp', 'us-west1', 'Oregon', 'Oregon, US'),
-('gcp', 'us-west4', 'Las Vegas', 'Nevada, US'),
-('gcp', 'europe-west1', 'Belgium', 'Belgium'),
-('gcp', 'europe-west4', 'Netherlands', 'Netherlands'),
-('gcp', 'asia-southeast1', 'Singapore', 'Singapore'),
-('gcp', 'asia-northeast1', 'Tokyo', 'Japan'),
-('gcp', 'australia-southeast1', 'Sydney', 'Australia')
-ON CONFLICT (provider, region_code) DO NOTHING;
+-- Update existing regions with provider information
+UPDATE regions SET provider = 'azure' WHERE code IN ('eastus', 'eastus2', 'westus', 'westus2', 'centralus', 'northcentralus', 'southcentralus', 'westeurope', 'northeurope', 'southeastasia', 'japaneast', 'australiaeast');
+UPDATE regions SET provider = 'aws' WHERE code IN ('us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-northeast-1', 'ap-southeast-2');
+UPDATE regions SET provider = 'gcp' WHERE code IN ('us-central1', 'us-east1', 'us-west1', 'us-west4', 'europe-west1', 'europe-west4', 'asia-southeast1', 'asia-northeast1', 'australia-southeast1');
 
 -- Insert Azure GPU Instance Types
 INSERT INTO instance_types (provider, instance_type, instance_name, vcpu_count, memory_gb, gpu_count, gpu_memory_gb, gpu_model, gpu_compute_capability, price_per_hour, spot_price_per_hour) VALUES
@@ -164,26 +120,14 @@ INSERT INTO instance_types (provider, instance_type, instance_name, vcpu_count, 
 ON CONFLICT (provider, instance_type) DO NOTHING;
 
 -- Map instances to regions (all instances available in all regions for simplicity)
--- In production, you would selectively map based on actual cloud provider availability
-INSERT INTO region_instance_availability (region_id, instance_type_id, is_available)
-SELECT r.id, i.id, true
+INSERT INTO region_instance_availability (region_code, instance_type_id, is_available)
+SELECT r.code, i.id, true
 FROM regions r
 CROSS JOIN instance_types i
 WHERE r.provider = i.provider
-ON CONFLICT (region_id, instance_type_id) DO NOTHING;
+ON CONFLICT (region_code, instance_type_id) DO NOTHING;
 
--- Update timestamps trigger
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ language 'plpgsql';
-
-CREATE TRIGGER update_regions_updated_at BEFORE UPDATE ON regions
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
+-- Create trigger for instance_types updated_at
 CREATE TRIGGER update_instance_types_updated_at BEFORE UPDATE ON instance_types
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 

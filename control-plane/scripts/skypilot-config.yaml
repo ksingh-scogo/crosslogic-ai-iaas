@@ -1,0 +1,5 @@
+# SkyPilot Configuration for Azure-Only Deployment
+# This enables only Azure cloud
+
+allowed_clouds:
+  - azure

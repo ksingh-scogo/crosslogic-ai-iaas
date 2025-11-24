@@ -93,15 +93,125 @@ func (r *StateReconciler) reconcile(ctx context.Context) {
 }
 
 func (r *StateReconciler) getSkyPilotClusters(ctx context.Context) (map[string]SkyPilotCluster, error) {
-	cmd := exec.CommandContext(ctx, "sky", "status", "--refresh", "--json")
-	output, err := cmd.Output()
+	// Try with --refresh flag first (newer SkyPilot versions)
+	cmd := exec.CommandContext(ctx, "sky", "status", "--refresh")
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("sky status failed: %w", err)
+		// Check if this is a "no clusters" error (exit status 2 with empty output)
+		// or a legitimate error we should propagate
+		if len(output) == 0 {
+			r.logger.Debug("no sky clusters found or sky not configured", zap.Error(err))
+			return make(map[string]SkyPilotCluster), nil
+		}
+
+		// Check if --refresh is not supported (older SkyPilot)
+		if strings.Contains(string(output), "No such option: --refresh") {
+			// Try without --refresh
+			cmd = exec.CommandContext(ctx, "sky", "status")
+			output, err = cmd.CombinedOutput()
+			if err != nil && len(output) == 0 {
+				r.logger.Debug("no sky clusters found", zap.Error(err))
+				return make(map[string]SkyPilotCluster), nil
+			}
+		}
+
+		// Check if output suggests sky is not configured
+		if strings.Contains(string(output), "No cloud is enabled") ||
+			strings.Contains(string(output), "not enabled") ||
+			strings.Contains(string(output), "No clusters") {
+			r.logger.Debug("sky not fully configured, skipping reconciliation",
+				zap.String("output", string(output)),
+			)
+			return make(map[string]SkyPilotCluster), nil
+		}
+
+		// If still error, it's a real problem
+		if err != nil {
+			return nil, fmt.Errorf("sky status failed: %w (output: %s)", err, string(output))
+		}
 	}
 
+	// Parse output - sky status returns plain text, not JSON
+	// We need to parse the text output
+	clusterMap := r.parseSkyStatusOutput(string(output))
+	return clusterMap, nil
+}
+
+// parseSkyStatusOutput parses the plain text output from sky status command
+func (r *StateReconciler) parseSkyStatusOutput(output string) map[string]SkyPilotCluster {
+	clusterMap := make(map[string]SkyPilotCluster)
+
+	// Check if no clusters message
+	if strings.Contains(output, "No clusters") || strings.Contains(output, "No existing clusters") {
+		return clusterMap
+	}
+
+	// Parse line by line - sky status format:
+	// NAME               LAUNCHED   RESOURCES      STATUS   AUTOSTOP   COMMAND
+	// cluster-name       1 min ago  1x [provider]  UP       -          sky launch ...
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "NAME") {
+			continue
+		}
+
+		// Split by whitespace and extract cluster name and status
+		fields := strings.Fields(line)
+		if len(fields) >= 4 {
+			name := fields[0]
+			// Filter for our clusters only (cic- prefix)
+			if strings.HasPrefix(name, "cic-") {
+				// Status is usually the 4th field
+				status := "UNKNOWN"
+				region := ""
+
+				// Find STATUS field
+				for _, field := range fields {
+					upperField := strings.ToUpper(field)
+					if upperField == "UP" || upperField == "INIT" ||
+					   upperField == "STOPPED" || upperField == "DOWN" {
+						status = upperField
+						break
+					}
+					// Try to extract region from resource field (e.g., "1x[aws:us-east-1]")
+					if strings.Contains(field, "[") && strings.Contains(field, "]") {
+						start := strings.Index(field, "[")
+						end := strings.Index(field, "]")
+						if start < end {
+							resource := field[start+1 : end]
+							parts := strings.Split(resource, ":")
+							if len(parts) > 1 {
+								region = parts[1]
+							}
+						}
+					}
+				}
+
+				clusterMap[name] = SkyPilotCluster{
+					Name:   name,
+					Status: status,
+					Region: region,
+					HeadIP: "", // Not available in plain text output
+				}
+			}
+		}
+	}
+
+	return clusterMap
+}
+
+// Legacy JSON parsing function (kept for compatibility if JSON output is added in future)
+func (r *StateReconciler) parseSkyStatusJSON(output []byte) (map[string]SkyPilotCluster, error) {
 	var clusters []SkyPilotCluster
 	if err := json.Unmarshal(output, &clusters); err != nil {
-		return nil, fmt.Errorf("failed to parse sky status json: %w", err)
+		// If JSON parsing fails, it might be empty output or an error message
+		if len(output) == 0 || string(output) == "[]" {
+			r.logger.Debug("no clusters found in sky status output")
+			return make(map[string]SkyPilotCluster), nil
+		}
+		return nil, fmt.Errorf("failed to parse sky status json: %w (output: %s)", err, string(output))
 	}
 
 	clusterMap := make(map[string]SkyPilotCluster)

@@ -1,0 +1,845 @@
+openapi: 3.0.3
+info:
+  title: CrossLogic AI IaaS - Model Management API
+  description: |
+    Comprehensive CRUD APIs for managing AI models in the CrossLogic AI Infrastructure as a Service platform.
+
+    This API allows you to:
+    - List all available AI models with filtering and pagination
+    - Get detailed information about specific models
+    - Create new model entries
+    - Update existing models (full or partial updates)
+    - Delete models
+    - Search models with advanced filters
+
+    ## Authentication
+    All admin endpoints require an `X-Admin-Token` header for authentication.
+
+    ## Rate Limiting
+    - Admin endpoints: 1000 requests per minute
+    - Read operations: Higher rate limits than write operations
+
+    ## Versioning
+    This is version 1 of the API. All endpoints are prefixed with `/api/v1`.
+  version: 1.0.0
+  contact:
+    name: CrossLogic AI Support
+    email: support@crosslogic.ai
+    url: https://crosslogic.ai/support
+  license:
+    name: Proprietary
+    url: https://crosslogic.ai/license
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.crosslogic.ai
+    description: Production server
+
+tags:
+  - name: models
+    description: Model management operations
+  - name: admin
+    description: Administrative operations
+
+security:
+  - AdminToken: []
+
+paths:
+  /api/v1/admin/models:
+    get:
+      tags:
+        - models
+      summary: List all models
+      description: |
+        Retrieve a paginated list of AI models with optional filtering and search capabilities.
+
+        Supports filtering by:
+        - Family (e.g., llama, gpt, claude)
+        - Type (completion, chat, embedding)
+        - Status (active, deprecated, beta)
+        - VRAM requirements (range)
+
+        Results can be sorted by various fields and paginated.
+      operationId: listModels
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of models to return (default 50, max 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Number of models to skip (for pagination)
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: family
+          in: query
+          description: Filter by model family
+          required: false
+          schema:
+            type: string
+            example: llama
+        - name: type
+          in: query
+          description: Filter by model type
+          required: false
+          schema:
+            type: string
+            enum: [completion, chat, embedding]
+        - name: status
+          in: query
+          description: Filter by model status
+          required: false
+          schema:
+            type: string
+            enum: [active, deprecated, beta]
+        - name: min_vram
+          in: query
+          description: Minimum VRAM required (GB)
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: max_vram
+          in: query
+          description: Maximum VRAM required (GB)
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: search
+          in: query
+          description: Search by model name (case-insensitive, partial match)
+          required: false
+          schema:
+            type: string
+        - name: sort_by
+          in: query
+          description: Field to sort by
+          required: false
+          schema:
+            type: string
+            enum: [name, family, created_at, updated_at, vram_required_gb]
+            default: name
+        - name: sort_order
+          in: query
+          description: Sort order
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+      responses:
+        '200':
+          description: Successfully retrieved models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+              examples:
+                success:
+                  value:
+                    data:
+                      - id: "550e8400-e29b-41d4-a716-446655440000"
+                        name: "meta-llama/Llama-3.1-8B-Instruct"
+                        family: "llama"
+                        size: "8B"
+                        type: "chat"
+                        context_length: 8192
+                        vram_required_gb: 16
+                        price_input_per_million: 0.15
+                        price_output_per_million: 0.60
+                        tokens_per_second_capacity: 500
+                        status: "active"
+                        metadata:
+                          storage:
+                            provider: "cloudflare-r2"
+                            bucket: "crosslogic-models"
+                            path: "llama/3.1/8b-instruct"
+                          capabilities: ["chat", "instruction-following"]
+                          architecture: "transformer"
+                        created_at: "2024-01-15T10:30:00Z"
+                        updated_at: "2024-01-15T10:30:00Z"
+                    pagination:
+                      total: 1
+                      limit: 50
+                      offset: 0
+                      has_more: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - models
+      summary: Create a new model
+      description: Add a new AI model to the system with complete metadata
+      operationId: createModel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelCreate'
+            examples:
+              llama-model:
+                value:
+                  name: "meta-llama/Llama-3.1-70B-Instruct"
+                  family: "llama"
+                  size: "70B"
+                  type: "chat"
+                  context_length: 8192
+                  vram_required_gb: 140
+                  price_input_per_million: 0.90
+                  price_output_per_million: 2.70
+                  tokens_per_second_capacity: 200
+                  status: "active"
+                  metadata:
+                    storage:
+                      provider: "cloudflare-r2"
+                      bucket: "crosslogic-models"
+                      path: "llama/3.1/70b-instruct"
+                    capabilities: ["chat", "instruction-following", "long-context"]
+                    architecture: "transformer"
+                    quantization: "fp16"
+      responses:
+        '201':
+          description: Model created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Model with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/admin/models/{id}:
+    get:
+      tags:
+        - models
+      summary: Get a model by ID
+      description: Retrieve detailed information about a specific model
+      operationId: getModel
+      parameters:
+        - name: id
+          in: path
+          description: Model UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Model found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - models
+      summary: Update a model (full update)
+      description: |
+        Replace all fields of an existing model. All fields except `id`, `created_at`, and `updated_at` are required.
+      operationId: updateModel
+      parameters:
+        - name: id
+          in: path
+          description: Model UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelUpdate'
+      responses:
+        '200':
+          description: Model updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    patch:
+      tags:
+        - models
+      summary: Partially update a model
+      description: |
+        Update specific fields of an existing model. Only provided fields will be updated.
+        Useful for updating status, pricing, or metadata without resending all fields.
+      operationId: patchModel
+      parameters:
+        - name: id
+          in: path
+          description: Model UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelPatch'
+            examples:
+              update-status:
+                value:
+                  status: "deprecated"
+              update-pricing:
+                value:
+                  price_input_per_million: 0.12
+                  price_output_per_million: 0.48
+              update-metadata:
+                value:
+                  metadata:
+                    storage:
+                      provider: "aws-s3"
+                      bucket: "new-bucket"
+                      path: "new/path"
+      responses:
+        '200':
+          description: Model updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - models
+      summary: Delete a model
+      description: |
+        Remove a model from the system. This is a hard delete and cannot be undone.
+
+        **Warning**: Deleting a model that is currently in use by active nodes may cause service disruption.
+        Consider setting status to 'deprecated' instead.
+      operationId: deleteModel
+      parameters:
+        - name: id
+          in: path
+          description: Model UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Model deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Model is in use and cannot be deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/admin/models/search:
+    get:
+      tags:
+        - models
+      summary: Advanced model search
+      description: |
+        Search models with complex filters and full-text search capabilities.
+        This endpoint provides more advanced filtering than the list endpoint.
+      operationId: searchModels
+      parameters:
+        - name: q
+          in: query
+          description: Search query (searches name, family, and metadata)
+          required: false
+          schema:
+            type: string
+        - name: families
+          in: query
+          description: Comma-separated list of families to include
+          required: false
+          schema:
+            type: string
+            example: "llama,gpt,claude"
+        - name: types
+          in: query
+          description: Comma-separated list of types to include
+          required: false
+          schema:
+            type: string
+            example: "chat,completion"
+        - name: min_context_length
+          in: query
+          description: Minimum context length
+          required: false
+          schema:
+            type: integer
+        - name: max_price_input
+          in: query
+          description: Maximum input price per million tokens
+          required: false
+          schema:
+            type: number
+            format: double
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+                  query:
+                    type: string
+                    description: The search query used
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: Admin authentication token
+
+  schemas:
+    Model:
+      type: object
+      required:
+        - id
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the model
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          description: Model name (usually in format provider/model-name)
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+          maxLength: 255
+        family:
+          type: string
+          description: Model family (e.g., llama, gpt, claude, mistral)
+          example: "llama"
+          maxLength: 100
+        size:
+          type: string
+          nullable: true
+          description: Model size (e.g., 8B, 70B, 13B)
+          example: "8B"
+          maxLength: 50
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+          description: Type of model capability
+          example: "chat"
+        context_length:
+          type: integer
+          description: Maximum context length in tokens
+          example: 8192
+          minimum: 1
+        vram_required_gb:
+          type: integer
+          description: VRAM required to run the model (in GB)
+          example: 16
+          minimum: 1
+        price_input_per_million:
+          type: number
+          format: double
+          description: Price per million input tokens (in USD)
+          example: 0.15
+          minimum: 0
+        price_output_per_million:
+          type: number
+          format: double
+          description: Price per million output tokens (in USD)
+          example: 0.60
+          minimum: 0
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          description: Expected throughput capacity (tokens per second)
+          example: 500
+          minimum: 0
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+          description: Current status of the model
+          example: "active"
+        metadata:
+          type: object
+          description: |
+            JSONB field containing additional model information:
+            - storage: Information about where the model is stored (provider, bucket, path)
+            - capabilities: List of model capabilities
+            - architecture: Model architecture details
+            - quantization: Quantization format (fp16, int8, etc.)
+            - Any other custom metadata
+          example:
+            storage:
+              provider: "cloudflare-r2"
+              bucket: "crosslogic-models"
+              path: "llama/3.1/8b-instruct"
+            capabilities: ["chat", "instruction-following"]
+            architecture: "transformer"
+            quantization: "fp16"
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when the model was created
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Timestamp when the model was last updated
+          example: "2024-01-15T10:30:00Z"
+
+    ModelCreate:
+      type: object
+      required:
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          example: "meta-llama/Llama-3.1-70B-Instruct"
+        family:
+          type: string
+          maxLength: 100
+          example: "llama"
+        size:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: "70B"
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+          example: "chat"
+        context_length:
+          type: integer
+          minimum: 1
+          example: 8192
+        vram_required_gb:
+          type: integer
+          minimum: 1
+          example: 140
+        price_input_per_million:
+          type: number
+          format: double
+          minimum: 0
+          example: 0.90
+        price_output_per_million:
+          type: number
+          format: double
+          minimum: 0
+          example: 2.70
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          minimum: 0
+          example: 200
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+          default: "active"
+          example: "active"
+        metadata:
+          type: object
+          default: {}
+          example:
+            storage:
+              provider: "cloudflare-r2"
+              bucket: "crosslogic-models"
+              path: "llama/3.1/70b-instruct"
+
+    ModelUpdate:
+      type: object
+      required:
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+        - status
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        family:
+          type: string
+          maxLength: 100
+        size:
+          type: string
+          nullable: true
+          maxLength: 50
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+          minimum: 1
+        vram_required_gb:
+          type: integer
+          minimum: 1
+        price_input_per_million:
+          type: number
+          format: double
+          minimum: 0
+        price_output_per_million:
+          type: number
+          format: double
+          minimum: 0
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          minimum: 0
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+        metadata:
+          type: object
+
+    ModelPatch:
+      type: object
+      description: Partial update - only include fields you want to change
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        family:
+          type: string
+          maxLength: 100
+        size:
+          type: string
+          nullable: true
+          maxLength: 50
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+          minimum: 1
+        vram_required_gb:
+          type: integer
+          minimum: 1
+        price_input_per_million:
+          type: number
+          format: double
+          minimum: 0
+        price_output_per_million:
+          type: number
+          format: double
+          minimum: 0
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          minimum: 0
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+        metadata:
+          type: object
+
+    Pagination:
+      type: object
+      properties:
+        total:
+          type: integer
+          description: Total number of items matching the query
+          example: 42
+        limit:
+          type: integer
+          description: Maximum number of items per page
+          example: 50
+        offset:
+          type: integer
+          description: Number of items skipped
+          example: 0
+        has_more:
+          type: boolean
+          description: Whether there are more items available
+          example: false
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - type
+            - message
+          properties:
+            type:
+              type: string
+              description: Error type
+              example: "invalid_request_error"
+            message:
+              type: string
+              description: Human-readable error message
+              example: "Invalid model ID format"
+            field:
+              type: string
+              description: Field that caused the error (for validation errors)
+              example: "name"
+            code:
+              type: string
+              description: Machine-readable error code
+              example: "INVALID_UUID"
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters or body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid-uuid:
+              value:
+                error:
+                  type: "invalid_request_error"
+                  message: "Invalid UUID format"
+                  code: "INVALID_UUID"
+            missing-field:
+              value:
+                error:
+                  type: "validation_error"
+                  message: "Field 'name' is required"
+                  field: "name"
+                  code: "REQUIRED_FIELD"
+
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "authentication_error"
+              message: "Invalid or missing X-Admin-Token header"
+              code: "UNAUTHORIZED"
+
+    NotFound:
+      description: Model not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "invalid_request_error"
+              message: "Model not found"
+              code: "NOT_FOUND"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "api_error"
+              message: "An internal error occurred. Please try again later."
+              code: "INTERNAL_ERROR"

@@ -87,9 +87,14 @@ func (g *Gateway) setupRoutes() {
 	// Metrics endpoint
 	g.registerMetrics()
 
-	// Health check (no auth required)
+	// === PUBLIC ENDPOINTS (No Auth) ===
+	// Health check
 	g.router.Get("/health", g.handleHealth)
 	g.router.Get("/ready", g.handleReady)
+
+	// API documentation
+	g.router.Get("/api-docs", g.handleSwaggerUI)
+	g.router.Get("/api/v1/admin/openapi.yaml", g.handleOpenAPISpec)
 
 	// Stripe webhook endpoint (no auth - uses signature verification)
 	if g.webhookHandler != nil {
@@ -100,56 +105,97 @@ func (g *Gateway) setupRoutes() {
 		})
 	}
 
-	// OpenAI-compatible endpoints (require auth)
+	// === PLATFORM ADMIN APIs (X-Admin-Token auth) ===
+	g.router.Group(func(r chi.Router) {
+		r.Use(g.adminAuthMiddleware)
+
+		// Admin - Models (RESTful CRUD)
+		r.Get("/api/v1/admin/models", g.HandleListModels)
+		r.Post("/api/v1/admin/models", g.HandleCreateModel)
+		r.Get("/api/v1/admin/models/search", g.HandleSearchModels)
+		r.Get("/api/v1/admin/models/{id}", g.HandleGetModel)
+		r.Put("/api/v1/admin/models/{id}", g.HandleUpdateModel)
+		r.Patch("/api/v1/admin/models/{id}", g.HandlePatchModel)
+		r.Delete("/api/v1/admin/models/{id}", g.HandleDeleteModel)
+
+		// Admin - Nodes
+		r.Get("/admin/nodes", g.handleListNodes)
+		r.Post("/admin/nodes/launch", g.handleLaunchNode)
+		r.Post("/admin/nodes/register", g.handleRegisterNode)
+		r.Get("/admin/nodes/{cluster_name}", g.handleNodeStatus)
+		r.Post("/admin/nodes/{cluster_name}/terminate", g.handleTerminateNode)
+		r.Get("/admin/nodes/{cluster_name}/status", g.handleNodeStatus)
+		r.Post("/admin/nodes/{node_id}/heartbeat", g.handleHeartbeat)
+		r.Post("/admin/nodes/{node_id}/drain", g.handleDrainNode)
+		r.Post("/admin/nodes/{node_id}/termination-warning", g.handleTerminationWarning)
+
+		// Admin - Deployments
+		r.Post("/admin/deployments", g.handleCreateDeployment)
+		r.Get("/admin/deployments", g.handleListDeployments)
+		r.Get("/admin/deployments/{id}", g.handleGetDeployment)
+		r.Put("/admin/deployments/{id}/scale", g.handleScaleDeployment)
+		r.Delete("/admin/deployments/{id}", g.handleDeleteDeployment)
+
+		// Admin - Routing
+		r.Get("/admin/routes", g.handleListRoutes)
+		r.Get("/admin/routes/{model_id}", g.handleGetRoute)
+		r.Put("/admin/routes/{model_id}", g.handleUpdateRoute)
+
+		// Admin - Tenants
+		r.Post("/admin/tenants", g.handleCreateTenant)
+		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
+		r.Get("/admin/tenants", g.handleListTenants)
+		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
+		r.Put("/admin/tenants/{id}", g.handleUpdateTenant)
+		r.Get("/admin/tenants/{id}/usage", g.handleGetTenantUsageAdmin)
+
+		// Admin - Platform
+		r.Get("/admin/platform/health", g.handlePlatformHealth)
+		r.Get("/admin/platform/metrics", g.handlePlatformMetrics)
+
+		// Admin - API Keys (admin view - all keys for a tenant)
+		r.Get("/admin/api-keys/{tenant_id}", g.handleListAPIKeys)
+		r.Post("/admin/api-keys", g.handleCreateAPIKey)
+		r.Delete("/admin/api-keys/{key_id}", g.handleRevokeAPIKey)
+
+		// Admin - Model/Instance management (UI-driven, legacy)
+		r.Get("/admin/models/r2", g.ListR2ModelsHandler)
+		r.Post("/admin/instances/launch", g.LaunchModelInstanceHandler)
+		r.Get("/admin/instances/status", g.GetLaunchStatusHandler)
+		r.Get("/admin/regions", g.ListRegionsHandler)
+		r.Get("/admin/instance-types", g.ListInstanceTypesHandler)
+	})
+
+	// === TENANT (CUSTOMER) APIs (Bearer token auth) ===
 	g.router.Group(func(r chi.Router) {
 		r.Use(g.authMiddleware)
 		r.Use(g.rateLimitMiddleware)
 
-		// Chat completions
+		// Tenant - API Keys (self-service)
+		r.Post("/v1/api-keys", g.handleCreateTenantAPIKey)
+		r.Get("/v1/api-keys", g.handleListTenantAPIKeys)
+		r.Delete("/v1/api-keys/{key_id}", g.handleRevokeTenantAPIKey)
+
+		// Tenant - Endpoints (discovery)
+		r.Get("/v1/endpoints", g.handleListTenantEndpoints)
+		r.Get("/v1/endpoints/{model_id}", g.handleGetTenantEndpoint)
+
+		// Tenant - Inference (OpenAI-compatible)
 		r.Post("/v1/chat/completions", g.handleChatCompletions)
 		r.Post("/v1/completions", g.handleCompletions)
-
-		// Embeddings
 		r.Post("/v1/embeddings", g.handleEmbeddings)
-
-		// Models
 		r.Get("/v1/models", g.handleListModels)
 		r.Get("/v1/models/{model}", g.handleGetModel)
-	})
 
-	// Admin endpoints
-	g.router.Group(func(r chi.Router) {
-		r.Use(g.adminAuthMiddleware)
+		// Tenant - Usage & Billing
+		r.Get("/v1/usage", g.handleGetUsage)
+		r.Get("/v1/usage/by-model", g.handleGetUsageByModel)
+		r.Get("/v1/usage/by-key", g.handleGetUsageByKey)
+		r.Get("/v1/usage/by-date", g.handleGetUsageByDate)
 
-		// Node management
-		r.Get("/admin/nodes", g.handleListNodes)
-		r.Post("/admin/nodes/launch", g.handleLaunchNode)
-		r.Post("/admin/nodes/{cluster_name}/terminate", g.handleTerminateNode)
-		r.Get("/admin/nodes/{cluster_name}/status", g.handleNodeStatus)
-		r.Post("/admin/nodes/{node_id}/heartbeat", g.handleHeartbeat)
-		r.Post("/admin/nodes/{node_id}/termination-warning", g.handleTerminationWarning)
-
-		// Usage and billing
-		r.Get("/admin/usage/{tenant_id}", g.handleGetUsage)
-
-		// API Keys
-		r.Get("/admin/api-keys/{tenant_id}", g.handleListAPIKeys)
-		r.Post("/admin/api-keys", g.handleCreateAPIKey)
-		r.Delete("/admin/api-keys/{key_id}", g.handleRevokeAPIKey)
-		
-		// Model and instance management (UI-driven)
-		r.Get("/admin/models/r2", g.ListR2ModelsHandler)
-		r.Post("/admin/instances/launch", g.LaunchModelInstanceHandler)
-		r.Get("/admin/instances/status", g.GetLaunchStatusHandler)
-
-		// Regions and instance types (for dropdowns)
-		r.Get("/admin/regions", g.ListRegionsHandler)
-		r.Get("/admin/instance-types", g.ListInstanceTypesHandler)
-
-		// Tenant management
-		r.Post("/admin/tenants", g.handleCreateTenant)
-		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
-		r.Get("/admin/tenants/{tenant_id}", g.handleGetTenant)
+		// Tenant - Metrics
+		r.Get("/v1/metrics/latency", g.handleGetLatencyMetrics)
+		r.Get("/v1/metrics/tokens", g.handleGetTokenMetrics)
 	})
 }
 
@@ -204,6 +250,132 @@ func (g *Gateway) handleTerminationWarning(w http.ResponseWriter, r *http.Reques
 	}
 
 	g.writeJSON(w, http.StatusOK, map[string]string{"status": "received"})
+}
+
+func (g *Gateway) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClusterName   string  `json:"cluster_name"`
+		Provider      string  `json:"provider"`
+		Region        string  `json:"region"`
+		InstanceType  string  `json:"instance_type"`
+		GPUType       string  `json:"gpu_type"`
+		VRAMTotalGB   int     `json:"vram_total_gb"`
+		ModelName     string  `json:"model_name"`
+		EndpointURL   string  `json:"endpoint_url"`
+		InternalIP    string  `json:"internal_ip"`
+		SpotInstance  bool    `json:"spot_instance"`
+		SpotPrice     float64 `json:"spot_price"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		g.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate required fields
+	if req.ClusterName == "" || req.Provider == "" || req.EndpointURL == "" {
+		g.writeError(w, http.StatusBadRequest, "cluster_name, provider, and endpoint_url are required")
+		return
+	}
+
+	g.logger.Info("registering node",
+		zap.String("cluster_name", req.ClusterName),
+		zap.String("provider", req.Provider),
+		zap.String("endpoint", req.EndpointURL),
+	)
+
+	// Check if node already exists
+	var existingID string
+	checkQuery := `SELECT id FROM nodes WHERE cluster_name = $1`
+	err := g.db.Pool.QueryRow(r.Context(), checkQuery, req.ClusterName).Scan(&existingID)
+
+	if err == nil {
+		// Node exists, update it
+		updateQuery := `
+			UPDATE nodes SET
+				endpoint_url = $1,
+				internal_ip = $2,
+				status = 'active',
+				health_score = 100.0,
+				last_heartbeat_at = NOW(),
+				updated_at = NOW()
+			WHERE cluster_name = $3
+			RETURNING id
+		`
+		var nodeID string
+		err = g.db.Pool.QueryRow(r.Context(), updateQuery,
+			req.EndpointURL, req.InternalIP, req.ClusterName,
+		).Scan(&nodeID)
+
+		if err != nil {
+			g.logger.Error("failed to update node", zap.Error(err))
+			g.writeError(w, http.StatusInternalServerError, "failed to update node")
+			return
+		}
+
+		g.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "updated",
+			"node_id": nodeID,
+		})
+		return
+	}
+
+	// Create new node
+	insertQuery := `
+		INSERT INTO nodes (
+			cluster_name, provider, instance_type, gpu_type, vram_total_gb,
+			model_name, endpoint_url, internal_ip, spot_instance, spot_price,
+			status, health_score, last_heartbeat_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', 100.0, NOW())
+		RETURNING id
+	`
+
+	var nodeID string
+	err = g.db.Pool.QueryRow(r.Context(), insertQuery,
+		req.ClusterName, req.Provider, req.InstanceType, req.GPUType, req.VRAMTotalGB,
+		req.ModelName, req.EndpointURL, req.InternalIP, req.SpotInstance, req.SpotPrice,
+	).Scan(&nodeID)
+
+	if err != nil {
+		g.logger.Error("failed to register node", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to register node")
+		return
+	}
+
+	g.logger.Info("node registered successfully", zap.String("node_id", nodeID))
+
+	g.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"status":  "registered",
+		"node_id": nodeID,
+	})
+}
+
+func (g *Gateway) handleDrainNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		g.writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	g.logger.Info("draining node", zap.String("node_id", nodeID))
+
+	// Mark node as draining
+	query := `UPDATE nodes SET status = 'draining', status_message = 'graceful_drain_initiated' WHERE id = $1`
+	_, err := g.db.Pool.Exec(r.Context(), query, nodeID)
+	if err != nil {
+		g.logger.Error("failed to update node status", zap.Error(err))
+		g.writeError(w, http.StatusInternalServerError, "failed to drain node")
+		return
+	}
+
+	// Publish event
+	if g.eventBus != nil {
+		g.eventBus.Publish(r.Context(), events.NewEvent(events.EventNodeDraining, "", map[string]interface{}{
+			"node_id": nodeID,
+		}))
+	}
+
+	g.writeJSON(w, http.StatusOK, map[string]string{"status": "draining"})
 }
 
 // StartHealthMetrics starts a background goroutine to update dependency health metrics
@@ -716,7 +888,7 @@ func (g *Gateway) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	g.writeJSON(w, http.StatusOK, nodes)
 }
 
-func (g *Gateway) handleGetUsage(w http.ResponseWriter, r *http.Request) {
+func (g *Gateway) handleGetTenantUsageAdmin(w http.ResponseWriter, r *http.Request) {
 	tenantIDStr := chi.URLParam(r, "tenant_id")
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {

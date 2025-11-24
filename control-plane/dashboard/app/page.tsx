@@ -47,6 +47,9 @@ export default async function Home() {
           <a className="btn secondary" href="/usage">
             Review usage
           </a>
+          <a className="btn secondary" href="/api-docs">
+            API Docs
+          </a>
         </div>
       </div>
 

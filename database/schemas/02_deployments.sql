@@ -94,15 +94,17 @@ CREATE TRIGGER update_deployments_updated_at BEFORE UPDATE ON deployments
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================
--- SAMPLE DATA FOR TESTING
+-- SAMPLE DATA FOR TESTING (commented out by default)
 -- ============================================================================
+-- WARNING: Uncommenting these will create auto-scaling deployments that attempt to launch nodes
+-- Only enable these if you have properly configured cloud providers (AWS/Azure/GCP) with SkyPilot
 
 -- Example deployment: Llama 3 70B with auto-scaling
-INSERT INTO deployments (name, model_name, min_replicas, max_replicas, strategy, gpu_type)
-VALUES ('llama-3-70b-prod', 'meta-llama/Llama-3-70b-instruct', 2, 8, 'spread', 'auto')
-ON CONFLICT (name) DO NOTHING;
+-- INSERT INTO deployments (name, model_name, min_replicas, max_replicas, strategy, gpu_type, status)
+-- VALUES ('llama-3-70b-prod', 'meta-llama/Llama-3-70b-instruct', 2, 8, 'spread', 'auto', 'paused')
+-- ON CONFLICT (name) DO NOTHING;
 
 -- Example deployment: Mistral 7B with fixed GPU type
-INSERT INTO deployments (name, model_name, min_replicas, max_replicas, strategy, provider, region, gpu_type)
-VALUES ('mistral-7b-us-east', 'mistralai/Mistral-7B-Instruct-v0.2', 2, 5, 'packed', 'aws', 'us-east-1', 'A10G')
-ON CONFLICT (name) DO NOTHING;
+-- INSERT INTO deployments (name, model_name, min_replicas, max_replicas, strategy, provider, region, gpu_type, status)
+-- VALUES ('mistral-7b-us-east', 'mistralai/Mistral-7B-Instruct-v0.2', 2, 5, 'packed', 'aws', 'us-east-1', 'A10G', 'paused')
+-- ON CONFLICT (name) DO NOTHING;

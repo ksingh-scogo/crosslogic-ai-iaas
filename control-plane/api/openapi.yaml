@@ -1,0 +1,3743 @@
+openapi: 3.0.3
+info:
+  title: CrossLogic AI IaaS - Control Plane API
+  description: |
+    ## Multi-Tenant AI Infrastructure Platform
+
+    CrossLogic AI IaaS provides a comprehensive platform for deploying and managing AI models at scale.
+    The API is organized into two distinct groups:
+
+    ### Platform Admin APIs
+    Platform administrators use these APIs to manage the infrastructure, deploy models, and oversee tenants.
+    All admin endpoints require X-Admin-Token authentication and are prefixed with `/admin/`.
+
+    **Key Responsibilities:**
+    - Upload and manage AI models
+    - Launch and terminate GPU nodes
+    - Deploy models to vLLM inference servers
+    - Configure load balancing and routing
+    - Create and manage tenant accounts
+    - Monitor platform-wide metrics
+
+    ### Tenant (Customer) APIs
+    Tenants use these APIs to access inference endpoints and manage their usage.
+    All tenant endpoints require Bearer API key authentication and are prefixed with `/v1/`.
+
+    **Key Capabilities:**
+    - Discover available inference endpoints
+    - Perform inference (chat, completions, embeddings)
+    - Manage API keys
+    - View usage and billing metrics
+
+    ## Deployment Lifecycle
+
+    1. **Model Upload**: Admin uploads model weights to R2 storage
+    2. **Model Registration**: Admin adds model metadata via POST /admin/models
+    3. **Node Launch**: Admin provisions GPU nodes via POST /admin/nodes/launch
+    4. **Model Deployment**: Admin deploys model to vLLM via POST /admin/deployments
+    5. **Endpoint Creation**: System automatically creates load-balanced inference endpoint
+    6. **Tenant Discovery**: Tenants discover endpoints via GET /v1/endpoints
+    7. **Inference**: Tenants use endpoints via POST /v1/chat/completions
+
+    ## Load Balancing
+
+    When multiple nodes run the same model, they are automatically grouped behind a single
+    inference endpoint with intelligent load balancing:
+    - Health checking and automatic failover
+    - Multiple strategies: round-robin, least-latency, least-connections
+    - Request characteristic-based routing
+    - Zero-downtime deployments
+
+    ## Multi-Tenancy
+
+    Tenants have isolated:
+    - API keys and authentication
+    - Usage tracking and billing
+    - Rate limits based on tier
+
+    But share the same model deployments for cost efficiency.
+
+  version: 1.0.0
+  contact:
+    name: CrossLogic AI Support
+    email: support@crosslogic.ai
+    url: https://crosslogic.ai/support
+  license:
+    name: Proprietary
+    url: https://crosslogic.ai/license
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.crosslogic.ai
+    description: Production server
+
+tags:
+  # Admin Tags
+  - name: Admin - Models
+    description: |
+      Manage AI models in the platform catalog. Models must be registered here before
+      they can be deployed to nodes.
+  - name: Admin - Nodes
+    description: |
+      Launch, monitor, and terminate GPU nodes. Nodes are cloud instances that run
+      the vLLM inference server.
+  - name: Admin - Deployments
+    description: |
+      Deploy models to vLLM on GPU nodes. A deployment represents one or more nodes
+      running the same model, managed as a group.
+  - name: Admin - Routing
+    description: |
+      Configure load balancer routing for inference endpoints. Control traffic distribution
+      across nodes running the same model.
+  - name: Admin - Tenants
+    description: |
+      Create and manage tenant accounts. Each tenant represents a customer organization
+      with isolated billing and usage tracking.
+  - name: Admin - Platform
+    description: |
+      Platform-wide health checks, metrics, and configuration. View overall system status
+      and available cloud resources.
+
+  # Tenant Tags
+  - name: Tenant - API Keys
+    description: |
+      Create and manage API keys for authentication. Each key can be revoked independently
+      and tracks individual usage.
+  - name: Tenant - Endpoints
+    description: |
+      Discover available inference endpoints. Endpoints are load-balanced URLs that route
+      requests to healthy model instances.
+  - name: Tenant - Inference
+    description: |
+      OpenAI-compatible inference endpoints for chat, completions, and embeddings.
+      Automatically routed to healthy nodes with the requested model.
+  - name: Tenant - Usage & Billing
+    description: |
+      View usage metrics, costs, and performance data. Track token usage, request counts,
+      latency, and spending by model or API key.
+
+  # Public Tags
+  - name: Public
+    description: Public endpoints that require no authentication
+
+paths:
+  # =============================================================================
+  # PUBLIC APIs - No Authentication Required
+  # =============================================================================
+
+  /health:
+    get:
+      tags:
+        - Public
+      summary: Health check
+      description: Returns basic health status of the control plane. No authentication required.
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  time:
+                    type: string
+                    format: date-time
+                    example: "2024-01-15T10:30:00Z"
+
+  /api-docs:
+    get:
+      tags:
+        - Public
+      summary: API documentation
+      description: Swagger UI for interactive API documentation
+      operationId: apiDocs
+      security: []
+      responses:
+        '200':
+          description: HTML page with Swagger UI
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /api/v1/admin/openapi.yaml:
+    get:
+      tags:
+        - Public
+      summary: OpenAPI specification
+      description: Download the OpenAPI 3.0.3 specification file
+      operationId: openapiSpec
+      security: []
+      responses:
+        '200':
+          description: OpenAPI YAML specification
+          content:
+            application/x-yaml:
+              schema:
+                type: string
+
+  # =============================================================================
+  # PLATFORM ADMIN APIs - X-Admin-Token Authentication
+  # =============================================================================
+
+  # ---------------------------------------------------------------------------
+  # Admin - Models
+  # ---------------------------------------------------------------------------
+
+  /admin/models:
+    get:
+      tags:
+        - Admin - Models
+      summary: List all models in platform
+      description: |
+        **Platform Admin Only**
+
+        Lists all AI models registered in the platform catalog with filtering and pagination.
+        These are models available for deployment to GPU nodes.
+
+        Supports filtering by family, type, status, and VRAM requirements.
+      operationId: listAdminModels
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of models to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Number of models to skip (for pagination)
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: family
+          in: query
+          description: Filter by model family (e.g., llama, gpt, mistral)
+          schema:
+            type: string
+        - name: type
+          in: query
+          description: Filter by model type
+          schema:
+            type: string
+            enum: [completion, chat, embedding]
+        - name: status
+          in: query
+          description: Filter by model status
+          schema:
+            type: string
+            enum: [active, deprecated, beta]
+        - name: min_vram
+          in: query
+          description: Minimum VRAM required (GB)
+          schema:
+            type: integer
+        - name: max_vram
+          in: query
+          description: Maximum VRAM required (GB)
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: Search by model name (case-insensitive)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of models
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelListResponse'
+              example:
+                data:
+                  - id: "550e8400-e29b-41d4-a716-446655440000"
+                    name: "meta-llama/Llama-3.1-8B-Instruct"
+                    family: "llama"
+                    size: "8B"
+                    type: "chat"
+                    context_length: 8192
+                    vram_required_gb: 16
+                    price_input_per_million: 0.15
+                    price_output_per_million: 0.60
+                    status: "active"
+                    created_at: "2024-01-15T10:00:00Z"
+                    updated_at: "2024-01-15T10:00:00Z"
+                pagination:
+                  total: 42
+                  limit: 50
+                  offset: 0
+                  has_more: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Admin - Models
+      summary: Add new model to platform
+      description: |
+        **Platform Admin Only**
+
+        Registers a new AI model in the platform catalog. Model weights should already
+        be uploaded to R2 storage before calling this endpoint.
+
+        **Prerequisites:**
+        1. Upload model weights to R2 storage
+        2. Verify model format and compatibility
+        3. Determine VRAM requirements
+
+        After registration, the model can be deployed to GPU nodes.
+      operationId: createAdminModel
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelCreate'
+            example:
+              name: "meta-llama/Llama-3.1-8B-Instruct"
+              family: "llama"
+              size: "8B"
+              type: "chat"
+              context_length: 8192
+              vram_required_gb: 16
+              price_input_per_million: 0.15
+              price_output_per_million: 0.60
+              tokens_per_second_capacity: 500
+              status: "active"
+              metadata:
+                r2_path: "models/llama-3.1-8b-instruct"
+                quantization: "none"
+                license: "llama3.1"
+      responses:
+        '201':
+          description: Model created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Model with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/models/{id}:
+    get:
+      tags:
+        - Admin - Models
+      summary: Get model details
+      description: |
+        **Platform Admin Only**
+
+        Retrieves detailed information about a specific model including metadata,
+        pricing, and deployment status.
+      operationId: getAdminModel
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Model UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Model details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Admin - Models
+      summary: Update model configuration
+      description: |
+        **Platform Admin Only**
+
+        Updates model metadata, pricing, or status. Full update - all fields must be provided.
+
+        Use PATCH for partial updates (e.g., just changing price or status).
+      operationId: updateAdminModel
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Model UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelUpdate'
+      responses:
+        '200':
+          description: Model updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Admin - Models
+      summary: Remove model from platform
+      description: |
+        **Platform Admin Only**
+
+        Removes a model from the platform catalog. This is a hard delete and cannot be undone.
+
+        **Warning:** Deleting a model with active deployments will cause service disruption.
+        Consider setting status to 'deprecated' instead to prevent new deployments while
+        allowing existing ones to continue.
+      operationId: deleteAdminModel
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Model UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Model deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Model has active deployments and cannot be deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Nodes
+  # ---------------------------------------------------------------------------
+
+  /admin/nodes:
+    get:
+      tags:
+        - Admin - Nodes
+      summary: List all nodes across all tenants
+      description: |
+        **Platform Admin Only**
+
+        Lists all GPU nodes in the cluster with their status, health, and endpoints.
+        Includes nodes across all cloud providers and regions.
+
+        Use this to monitor overall cluster health and capacity.
+      operationId: listAdminNodes
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: provider
+          in: query
+          description: Filter by cloud provider
+          schema:
+            type: string
+            enum: [aws, azure, gcp]
+        - name: region
+          in: query
+          description: Filter by region
+          schema:
+            type: string
+        - name: model
+          in: query
+          description: Filter by deployed model name
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by node status
+          schema:
+            type: string
+            enum: [active, draining, terminating, terminated]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: List of nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+                  total:
+                    type: integer
+              example:
+                data:
+                  - id: "660e8400-e29b-41d4-a716-446655440001"
+                    cluster_name: "crosslogic-azure-eastus-a10-abc123"
+                    provider: "azure"
+                    region: "eastus"
+                    instance_type: "Standard_NV36ads_A10_v5"
+                    gpu_type: "A10"
+                    gpu_count: 1
+                    model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    status: "active"
+                    endpoint_url: "http://10.0.1.5:8000"
+                    health_score: 98.5
+                    last_heartbeat_at: "2024-01-15T10:30:00Z"
+                    spot_instance: true
+                    created_at: "2024-01-15T08:00:00Z"
+                total: 15
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/nodes/launch:
+    post:
+      tags:
+        - Admin - Nodes
+      summary: Launch GPU node with specified model
+      description: |
+        **Platform Admin Only**
+
+        Launches a new GPU node using SkyPilot orchestrator with the specified model.
+        This is the primary API for adding capacity to the platform.
+
+        **Process:**
+        1. Validates model exists in catalog
+        2. Provisions GPU instance via SkyPilot
+        3. Installs dependencies and vLLM
+        4. Downloads model from R2 storage
+        5. Starts vLLM inference server
+        6. Registers node with control plane
+
+        **Time:** Typically takes 3-5 minutes for spot instances, 2-3 minutes for on-demand.
+
+        Returns a job_id for tracking progress via GET /admin/nodes/launch-status.
+      operationId: launchAdminNode
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeLaunchRequest'
+            examples:
+              spot:
+                summary: Launch spot instance (cost-effective)
+                value:
+                  model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                  provider: "azure"
+                  region: "eastus"
+                  instance_type: "Standard_NV36ads_A10_v5"
+                  use_spot: true
+                  disk_size_gb: 256
+              ondemand:
+                summary: Launch on-demand instance (guaranteed)
+                value:
+                  model_name: "meta-llama/Llama-3.1-70B-Instruct"
+                  provider: "aws"
+                  region: "us-east-1"
+                  instance_type: "g5.12xlarge"
+                  use_spot: false
+                  disk_size_gb: 512
+      responses:
+        '202':
+          description: Node launch initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeLaunchResponse'
+              example:
+                job_id: "launch-660e8400"
+                node_id: "660e8400-e29b-41d4-a716-446655440001"
+                cluster_name: "crosslogic-azure-eastus-a10-abc123"
+                status: "launching"
+                model: "meta-llama/Llama-3.1-8B-Instruct"
+                provider: "azure"
+                region: "eastus"
+                estimated_time: "3-5 minutes"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/nodes/launch-status:
+    get:
+      tags:
+        - Admin - Nodes
+      summary: Get node launch status
+      description: |
+        **Platform Admin Only**
+
+        Retrieves the status of a node launch job. Poll this endpoint to track deployment progress.
+
+        **Statuses:**
+        - `launching`: Node provisioning in progress
+        - `loading_model`: Downloading model from R2
+        - `starting_vllm`: Starting inference server
+        - `registering`: Registering with control plane
+        - `completed`: Node is live and healthy
+        - `failed`: Launch failed (check error message)
+      operationId: getNodeLaunchStatus
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: job_id
+          in: query
+          required: true
+          description: Job ID returned by /admin/nodes/launch
+          schema:
+            type: string
+            example: "launch-660e8400"
+      responses:
+        '200':
+          description: Launch status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeLaunchStatus'
+              example:
+                job_id: "launch-660e8400"
+                status: "loading_model"
+                stage: "Downloading model from R2"
+                progress: 60
+                stages:
+                  - "✓ Validated configuration"
+                  - "✓ Provisioned GPU instance"
+                  - "✓ Installed dependencies"
+                  - "→ Downloading model from R2 (60%)"
+                  - "  Starting vLLM server"
+                  - "  Registering with control plane"
+                model: "meta-llama/Llama-3.1-8B-Instruct"
+                elapsed_seconds: 120
+        '404':
+          description: Job ID not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /admin/nodes/{cluster_name}:
+    get:
+      tags:
+        - Admin - Nodes
+      summary: Get specific node details
+      description: |
+        **Platform Admin Only**
+
+        Retrieves detailed information about a specific node including health metrics,
+        resource usage, and configuration.
+      operationId: getAdminNode
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: cluster_name
+          in: path
+          required: true
+          description: Cluster name of the node
+          schema:
+            type: string
+            example: "crosslogic-azure-eastus-a10-abc123"
+      responses:
+        '200':
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/nodes/{cluster_name}/terminate:
+    post:
+      tags:
+        - Admin - Nodes
+      summary: Terminate node
+      description: |
+        **Platform Admin Only**
+
+        Terminates a GPU node and cleans up cloud resources. Uses SkyPilot for graceful shutdown.
+
+        **Process:**
+        1. Marks node as draining (stops accepting new requests)
+        2. Waits for in-flight requests to complete (up to 30 seconds)
+        3. Shuts down vLLM server
+        4. Terminates cloud instance
+        5. Removes node from load balancer rotation
+
+        **Warning:** This action cannot be undone. Ensure no critical workloads are running.
+      operationId: terminateAdminNode
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: cluster_name
+          in: path
+          required: true
+          description: Cluster name of the node to terminate
+          schema:
+            type: string
+            example: "crosslogic-azure-eastus-a10-abc123"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force:
+                  type: boolean
+                  default: false
+                  description: Force immediate termination without waiting for requests to complete
+      responses:
+        '200':
+          description: Node terminated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cluster_name:
+                    type: string
+                  status:
+                    type: string
+                    example: "terminated"
+                  message:
+                    type: string
+                    example: "Node terminated successfully"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/nodes/{cluster_name}/status:
+    get:
+      tags:
+        - Admin - Nodes
+      summary: Get node status and health
+      description: |
+        **Platform Admin Only**
+
+        Retrieves the current status and health metrics of a GPU node from SkyPilot and vLLM.
+
+        **Status Values:**
+        - `INIT`: Node is initializing
+        - `UP`: Node is running and healthy
+        - `STOPPED`: Node is stopped but resources are allocated
+        - `TERMINATED`: Node is terminated and resources are released
+      operationId: getAdminNodeStatus
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: cluster_name
+          in: path
+          required: true
+          description: Cluster name of the node
+          schema:
+            type: string
+            example: "crosslogic-azure-eastus-a10-abc123"
+      responses:
+        '200':
+          description: Node status and health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cluster_name:
+                    type: string
+                  status:
+                    type: string
+                    enum: [INIT, UP, STOPPED, TERMINATED]
+                  health_score:
+                    type: number
+                    format: float
+                    description: Health score from 0-100
+                  vllm_status:
+                    type: string
+                    enum: [running, stopped, error]
+                  gpu_utilization:
+                    type: number
+                    format: float
+                    description: GPU utilization percentage
+                  memory_used_gb:
+                    type: number
+                    format: float
+                  last_heartbeat:
+                    type: string
+                    format: date-time
+              example:
+                cluster_name: "crosslogic-azure-eastus-a10-abc123"
+                status: "UP"
+                health_score: 98.5
+                vllm_status: "running"
+                gpu_utilization: 75.2
+                memory_used_gb: 18.4
+                last_heartbeat: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Deployments
+  # ---------------------------------------------------------------------------
+
+  /admin/deployments:
+    get:
+      tags:
+        - Admin - Deployments
+      summary: List all model deployments
+      description: |
+        **Platform Admin Only**
+
+        Lists all active model deployments. A deployment represents one or more nodes
+        running the same model, managed as a group behind a single inference endpoint.
+      operationId: listAdminDeployments
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: model
+          in: query
+          description: Filter by model name
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by deployment status
+          schema:
+            type: string
+            enum: [active, scaling, draining, terminated]
+      responses:
+        '200':
+          description: List of deployments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Deployment'
+              example:
+                data:
+                  - id: "770e8400-e29b-41d4-a716-446655440002"
+                    model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    status: "active"
+                    node_count: 3
+                    total_capacity_tps: 1500
+                    endpoint_url: "https://api.crosslogic.ai/inference/llama-3.1-8b"
+                    load_balancing_strategy: "least-latency"
+                    created_at: "2024-01-15T08:00:00Z"
+                    nodes:
+                      - cluster_name: "crosslogic-azure-eastus-a10-abc123"
+                        status: "active"
+                        health_score: 98.5
+                      - cluster_name: "crosslogic-azure-eastus-a10-def456"
+                        status: "active"
+                        health_score: 97.8
+                      - cluster_name: "crosslogic-aws-us-east-1-a10g-ghi789"
+                        status: "active"
+                        health_score: 99.1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Admin - Deployments
+      summary: Deploy model to vLLM on node(s)
+      description: |
+        **Platform Admin Only**
+
+        Creates a new deployment by launching one or more nodes with the specified model.
+        The nodes are automatically grouped behind a load-balanced inference endpoint.
+
+        **This is a higher-level API that combines:**
+        1. Node launching (POST /admin/nodes/launch)
+        2. Model deployment to vLLM
+        3. Endpoint creation and routing configuration
+
+        Use this for production deployments. Use POST /admin/nodes/launch for more
+        fine-grained control.
+      operationId: createAdminDeployment
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentRequest'
+            example:
+              model_name: "meta-llama/Llama-3.1-8B-Instruct"
+              node_count: 3
+              provider: "azure"
+              region: "eastus"
+              instance_type: "Standard_NV36ads_A10_v5"
+              use_spot: true
+              load_balancing_strategy: "least-latency"
+              auto_scaling:
+                enabled: true
+                min_nodes: 2
+                max_nodes: 10
+                target_latency_ms: 100
+      responses:
+        '202':
+          description: Deployment initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentResponse'
+              example:
+                deployment_id: "770e8400-e29b-41d4-a716-446655440002"
+                status: "launching"
+                message: "Deployment initiated. Launching 3 nodes..."
+                estimated_time: "5-8 minutes"
+                endpoint_url: "https://api.crosslogic.ai/inference/llama-3.1-8b"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/deployments/{id}:
+    get:
+      tags:
+        - Admin - Deployments
+      summary: Get deployment details
+      description: |
+        **Platform Admin Only**
+
+        Retrieves detailed information about a deployment including all nodes,
+        health metrics, and routing configuration.
+      operationId: getAdminDeployment
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Deployment UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deployment details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Admin - Deployments
+      summary: Remove deployment
+      description: |
+        **Platform Admin Only**
+
+        Removes a deployment by terminating all associated nodes and removing
+        the inference endpoint from the load balancer.
+
+        **Warning:** This will immediately stop all inference traffic for this model.
+        Ensure tenants are notified before removing production deployments.
+      operationId: deleteAdminDeployment
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Deployment UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graceful:
+                  type: boolean
+                  default: true
+                  description: Wait for in-flight requests to complete before terminating
+      responses:
+        '202':
+          description: Deployment termination initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "terminating"
+                  message:
+                    type: string
+                    example: "Draining nodes and terminating deployment..."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/deployments/{id}/scale:
+    post:
+      tags:
+        - Admin - Deployments
+      summary: Scale deployment (add/remove nodes)
+      description: |
+        **Platform Admin Only**
+
+        Scales a deployment by adding or removing nodes. Scaling is performed gradually
+        to maintain service availability.
+
+        **Scaling Up:** New nodes are launched, warmed up, and added to load balancer rotation.
+
+        **Scaling Down:** Nodes are drained (stop accepting new requests), wait for
+        in-flight requests to complete, then terminated.
+      operationId: scaleAdminDeployment
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Deployment UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - target_node_count
+              properties:
+                target_node_count:
+                  type: integer
+                  minimum: 1
+                  description: Desired number of nodes
+                  example: 5
+                strategy:
+                  type: string
+                  enum: [gradual, immediate]
+                  default: gradual
+                  description: Scaling strategy
+            example:
+              target_node_count: 5
+              strategy: "gradual"
+      responses:
+        '202':
+          description: Scaling initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "scaling"
+                  current_nodes:
+                    type: integer
+                    example: 3
+                  target_nodes:
+                    type: integer
+                    example: 5
+                  message:
+                    type: string
+                    example: "Scaling up: launching 2 additional nodes..."
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Routing
+  # ---------------------------------------------------------------------------
+
+  /admin/routes:
+    get:
+      tags:
+        - Admin - Routing
+      summary: List all inference routes/endpoints
+      description: |
+        **Platform Admin Only**
+
+        Lists all inference routes managed by the load balancer. Each route represents
+        an endpoint that tenants can use to access a deployed model.
+      operationId: listAdminRoutes
+      security:
+        - adminKeyAuth: []
+      responses:
+        '200':
+          description: List of routes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Route'
+              example:
+                data:
+                  - model_id: "550e8400-e29b-41d4-a716-446655440000"
+                    model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    endpoint_url: "https://api.crosslogic.ai/inference/llama-3.1-8b"
+                    strategy: "least-latency"
+                    healthy_nodes: 3
+                    total_nodes: 3
+                    avg_latency_ms: 45.2
+                    requests_per_second: 127.5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/routes/{model_id}:
+    get:
+      tags:
+        - Admin - Routing
+      summary: Get routing config for model
+      description: |
+        **Platform Admin Only**
+
+        Retrieves the routing configuration for a specific model including
+        load balancing strategy, health check settings, and node weights.
+      operationId: getAdminRoute
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          description: Model UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Routing configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Admin - Routing
+      summary: Update routing strategy
+      description: |
+        **Platform Admin Only**
+
+        Updates the load balancing strategy and routing configuration for a model.
+        Changes take effect immediately for new requests.
+
+        **Strategies:**
+        - `round-robin`: Distribute requests evenly across all healthy nodes
+        - `least-latency`: Route to node with lowest average latency
+        - `least-connections`: Route to node with fewest active connections
+        - `weighted`: Route based on custom node weights
+      operationId: updateAdminRoute
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          description: Model UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteConfigUpdate'
+            example:
+              strategy: "least-latency"
+              health_check:
+                interval_seconds: 10
+                timeout_seconds: 5
+                unhealthy_threshold: 3
+                healthy_threshold: 2
+              sticky_sessions: false
+              connection_timeout_ms: 30000
+      responses:
+        '200':
+          description: Routing configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Tenants
+  # ---------------------------------------------------------------------------
+
+  /admin/tenants:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: List all tenants
+      description: |
+        **Platform Admin Only**
+
+        Lists all tenant accounts in the platform with their status and tier information.
+      operationId: listAdminTenants
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by tenant status
+          schema:
+            type: string
+            enum: [active, suspended, deleted]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tenant'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+              example:
+                data:
+                  - id: "880e8400-e29b-41d4-a716-446655440003"
+                    name: "Acme Corp"
+                    email: "admin@acme.com"
+                    status: "active"
+                    tier: "enterprise"
+                    created_at: "2024-01-10T10:00:00Z"
+                    total_spend_usd: 1247.85
+                    api_keys_count: 5
+                pagination:
+                  total: 127
+                  limit: 50
+                  offset: 0
+                  has_more: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Admin - Tenants
+      summary: Create new tenant account
+      description: |
+        **Platform Admin Only**
+
+        Creates a new tenant organization with a default production environment.
+        Automatically creates initial API key and sets up usage tracking.
+      operationId: createAdminTenant
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+            example:
+              name: "Acme Corp"
+              email: "admin@acme.com"
+              tier: "pro"
+              rate_limit_per_minute: 1000
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantWithAPIKey'
+              example:
+                tenant:
+                  id: "880e8400-e29b-41d4-a716-446655440003"
+                  name: "Acme Corp"
+                  email: "admin@acme.com"
+                  status: "active"
+                  tier: "pro"
+                  created_at: "2024-01-15T10:30:00Z"
+                api_key: "sk-1234567890abcdef1234567890abcdef"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Tenant with this email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: Get tenant details
+      description: |
+        **Platform Admin Only**
+
+        Retrieves detailed information about a tenant including usage statistics
+        and billing information.
+      operationId: getAdminTenant
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Admin - Tenants
+      summary: Update tenant (tier, limits)
+      description: |
+        **Platform Admin Only**
+
+        Updates tenant configuration including tier, rate limits, and status.
+        Use this to upgrade/downgrade plans or suspend accounts.
+      operationId: updateAdminTenant
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantUpdate'
+            example:
+              tier: "enterprise"
+              rate_limit_per_minute: 5000
+              status: "active"
+      responses:
+        '200':
+          description: Tenant updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/usage:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: View tenant usage/billing
+      description: |
+        **Platform Admin Only**
+
+        Retrieves comprehensive usage and billing data for a tenant including
+        token counts, costs, and usage by model.
+      operationId: getAdminTenantUsage
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+        - name: start_date
+          in: query
+          description: Start date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          description: End date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: granularity
+          in: query
+          description: Time granularity for aggregation
+          schema:
+            type: string
+            enum: [hour, day, month]
+            default: day
+      responses:
+        '200':
+          description: Usage data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantUsage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Platform
+  # ---------------------------------------------------------------------------
+
+  /admin/platform/health:
+    get:
+      tags:
+        - Admin - Platform
+      summary: Overall platform health
+      description: |
+        **Platform Admin Only**
+
+        Returns comprehensive health status for the entire platform including
+        control plane, database, cache, and GPU nodes.
+      operationId: getAdminPlatformHealth
+      security:
+        - adminKeyAuth: []
+      responses:
+        '200':
+          description: Platform health
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformHealth'
+              example:
+                status: "healthy"
+                components:
+                  control_plane: "healthy"
+                  database: "healthy"
+                  cache: "healthy"
+                  gpu_nodes: "healthy"
+                metrics:
+                  total_nodes: 15
+                  healthy_nodes: 14
+                  unhealthy_nodes: 1
+                  total_capacity_tps: 7500
+                  current_rps: 1250
+                  avg_latency_ms: 52.3
+                timestamp: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/platform/metrics:
+    get:
+      tags:
+        - Admin - Platform
+      summary: Platform-wide metrics
+      description: |
+        **Platform Admin Only**
+
+        Returns platform-wide metrics including request rates, latency, costs,
+        and resource utilization.
+      operationId: getAdminPlatformMetrics
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: period
+          in: query
+          description: Time period for metrics
+          schema:
+            type: string
+            enum: [1h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Platform metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformMetrics'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/regions:
+    get:
+      tags:
+        - Admin - Platform
+      summary: Cloud regions available
+      description: |
+        **Platform Admin Only**
+
+        Lists available cloud regions for a provider. Use this to populate
+        region dropdowns when launching nodes.
+      operationId: listAdminRegions
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          description: Cloud provider
+          schema:
+            type: string
+            enum: [aws, azure, gcp]
+      responses:
+        '200':
+          description: List of regions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Region'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/instance-types:
+    get:
+      tags:
+        - Admin - Platform
+      summary: GPU instance types available
+      description: |
+        **Platform Admin Only**
+
+        Lists available GPU instance types for a provider with specifications
+        and pricing information.
+      operationId: listAdminInstanceTypes
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          description: Cloud provider
+          schema:
+            type: string
+            enum: [aws, azure, gcp]
+        - name: region
+          in: query
+          description: Filter by region (optional)
+          schema:
+            type: string
+        - name: gpu_type
+          in: query
+          description: Filter by GPU type (e.g., A10, A100, H100)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of instance types
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InstanceType'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # =============================================================================
+  # TENANT (CUSTOMER) APIs - Bearer API Key Authentication
+  # =============================================================================
+
+  # ---------------------------------------------------------------------------
+  # Tenant - API Keys
+  # ---------------------------------------------------------------------------
+
+  /v1/api-keys:
+    get:
+      tags:
+        - Tenant - API Keys
+      summary: List tenant's API keys
+      description: |
+        **Tenant API**
+
+        Lists all active API keys for the authenticated tenant. The actual key values
+        are not returned for security - only key prefixes and metadata.
+      operationId: listTenantAPIKeys
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/APIKey'
+              example:
+                data:
+                  - id: "990e8400-e29b-41d4-a716-446655440004"
+                    name: "Production API Key"
+                    prefix: "sk-...abc12345"
+                    created_at: "2024-01-15T10:00:00Z"
+                    last_used_at: "2024-01-15T10:25:00Z"
+                    status: "active"
+                    rate_limit_per_minute: 1000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Tenant - API Keys
+      summary: Create new API key for tenant
+      description: |
+        **Tenant API**
+
+        Creates a new API key for the authenticated tenant. The key is returned once
+        and cannot be retrieved again - store it securely.
+
+        **Security:** API keys provide full access to your account. Treat them like passwords.
+      operationId: createTenantAPIKey
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Descriptive name for the API key
+                  example: "Development API Key"
+            example:
+              name: "Development API Key"
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: string
+                    description: The API key (returned only once)
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+              example:
+                key: "sk-1234567890abcdef1234567890abcdef"
+                id: "990e8400-e29b-41d4-a716-446655440004"
+                name: "Development API Key"
+                created_at: "2024-01-15T10:30:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/api-keys/{key_id}:
+    delete:
+      tags:
+        - Tenant - API Keys
+      summary: Revoke API key
+      description: |
+        **Tenant API**
+
+        Revokes an API key, immediately preventing its use for authentication.
+        This action cannot be undone.
+      operationId: revokeTenantAPIKey
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          description: API key UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "revoked"
+                  message:
+                    type: string
+                    example: "API key revoked successfully"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Endpoints
+  # ---------------------------------------------------------------------------
+
+  /v1/endpoints:
+    get:
+      tags:
+        - Tenant - Endpoints
+      summary: List available inference endpoints
+      description: |
+        **Tenant API**
+
+        Lists all available inference endpoints (load-balanced) with model information
+        and capabilities. Use this to discover what models are available for inference.
+
+        Each endpoint is a load-balanced URL that routes requests to healthy nodes
+        running the specified model.
+      operationId: listTenantEndpoints
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by model type
+          schema:
+            type: string
+            enum: [completion, chat, embedding]
+      responses:
+        '200':
+          description: List of available endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EndpointInfo'
+              example:
+                data:
+                  - model_id: "550e8400-e29b-41d4-a716-446655440000"
+                    model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    family: "llama"
+                    type: "chat"
+                    context_length: 8192
+                    price_input_per_million: 0.15
+                    price_output_per_million: 0.60
+                    status: "available"
+                    avg_latency_ms: 45.2
+                    capacity_tps: 1500
+                    description: "Meta's Llama 3.1 8B parameter instruction-tuned model"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/endpoints/{model_id}:
+    get:
+      tags:
+        - Tenant - Endpoints
+      summary: Get specific endpoint details
+      description: |
+        **Tenant API**
+
+        Retrieves detailed information about a specific inference endpoint including
+        current status, capabilities, and performance metrics.
+      operationId: getTenantEndpoint
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          description: Model UUID or name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Endpoint details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndpointInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Inference
+  # ---------------------------------------------------------------------------
+
+  /v1/chat/completions:
+    post:
+      tags:
+        - Tenant - Inference
+      summary: Chat with LLM (OpenAI-compatible)
+      description: |
+        **Tenant API**
+
+        Creates a chat completion for the provided messages. Compatible with OpenAI's
+        chat completions API.
+
+        **Features:**
+        - Streaming and non-streaming responses
+        - Automatic load balancing across healthy nodes
+        - Failover on node failures
+        - Usage tracking and billing
+
+        The request is automatically routed to a healthy node running the specified model.
+      operationId: createChatCompletion
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+            examples:
+              simple:
+                summary: Simple chat
+                value:
+                  model: "meta-llama/Llama-3.1-8B-Instruct"
+                  messages:
+                    - role: "system"
+                      content: "You are a helpful assistant."
+                    - role: "user"
+                      content: "Hello!"
+              streaming:
+                summary: Streaming chat
+                value:
+                  model: "meta-llama/Llama-3.1-8B-Instruct"
+                  messages:
+                    - role: "user"
+                      content: "Write a story about AI"
+                  stream: true
+                  max_tokens: 500
+                  temperature: 0.7
+      responses:
+        '200':
+          description: Successful completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream (when stream=true)
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: No healthy nodes available for model
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/completions:
+    post:
+      tags:
+        - Tenant - Inference
+      summary: Text completion
+      description: |
+        **Tenant API**
+
+        Creates a completion for the provided prompt. Compatible with OpenAI's
+        completions API.
+
+        **Note:** This is a legacy endpoint. For chat applications, use
+        POST /v1/chat/completions instead.
+      operationId: createCompletion
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+            example:
+              model: "meta-llama/Llama-3.1-8B-Instruct"
+              prompt: "Once upon a time"
+              max_tokens: 100
+              temperature: 0.7
+      responses:
+        '200':
+          description: Successful completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/embeddings:
+    post:
+      tags:
+        - Tenant - Inference
+      summary: Generate embeddings
+      description: |
+        **Tenant API**
+
+        Creates embedding vectors for the provided input text. Compatible with
+        OpenAI's embeddings API.
+
+        **Use Cases:**
+        - Semantic search
+        - Recommendation systems
+        - Clustering and classification
+        - Anomaly detection
+      operationId: createEmbedding
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingRequest'
+            examples:
+              single:
+                summary: Single text
+                value:
+                  model: "text-embedding-ada-002"
+                  input: "The food was delicious and the waiter was friendly"
+              multiple:
+                summary: Multiple texts
+                value:
+                  model: "text-embedding-ada-002"
+                  input:
+                    - "First document to embed"
+                    - "Second document to embed"
+                    - "Third document to embed"
+      responses:
+        '200':
+          description: Successful embedding creation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/models:
+    get:
+      tags:
+        - Tenant - Inference
+      summary: List available models (tenant view)
+      description: |
+        **Tenant API**
+
+        Lists models currently available for inference. Returns only models with
+        healthy active nodes.
+
+        Compatible with OpenAI's models list endpoint.
+      operationId: listTenantModels
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: List of available models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: "list"
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InferenceModel'
+              example:
+                object: "list"
+                data:
+                  - id: "meta-llama/Llama-3.1-8B-Instruct"
+                    object: "model"
+                    created: 1677652288
+                    owned_by: "crosslogic"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Usage & Billing
+  # ---------------------------------------------------------------------------
+
+  /v1/usage:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Get tenant's usage summary
+      description: |
+        **Tenant API**
+
+        Retrieves usage summary for the authenticated tenant including total tokens,
+        requests, and costs.
+      operationId: getTenantUsageSummary
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          description: Start date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          description: End date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Usage summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSummary'
+              example:
+                start_date: "2024-01-01T00:00:00Z"
+                end_date: "2024-01-15T23:59:59Z"
+                total_tokens: 15847392
+                total_requests: 42847
+                total_cost_usd: 247.85
+                by_model:
+                  - model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    tokens: 12384756
+                    requests: 38429
+                    cost_usd: 198.32
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-model:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Usage breakdown by model
+      description: |
+        **Tenant API**
+
+        Retrieves usage data broken down by model for the authenticated tenant.
+      operationId: getTenantUsageByModel
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Usage by model
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ModelUsage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-key:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Usage breakdown by API key
+      description: |
+        **Tenant API**
+
+        Retrieves usage data broken down by API key for the authenticated tenant.
+        Useful for tracking usage across different services or environments.
+      operationId: getTenantUsageByKey
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Usage by API key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KeyUsage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-date:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Usage over time
+      description: |
+        **Tenant API**
+
+        Retrieves usage data aggregated by time period (hour, day, month) for
+        the authenticated tenant. Useful for charting and trend analysis.
+      operationId: getTenantUsageByDate
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: granularity
+          in: query
+          description: Time granularity for aggregation
+          schema:
+            type: string
+            enum: [hour, day, month]
+            default: day
+      responses:
+        '200':
+          description: Usage over time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TimeSeriesUsage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/metrics/latency:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Latency metrics per model
+      description: |
+        **Tenant API**
+
+        Retrieves latency performance metrics for the authenticated tenant's
+        requests, broken down by model.
+      operationId: getTenantLatencyMetrics
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: model
+          in: query
+          description: Filter by model name
+          schema:
+            type: string
+        - name: period
+          in: query
+          description: Time period for metrics
+          schema:
+            type: string
+            enum: [1h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Latency metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatencyMetrics'
+              example:
+                period: "24h"
+                data:
+                  - model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    avg_latency_ms: 45.2
+                    p50_latency_ms: 42.1
+                    p95_latency_ms: 78.5
+                    p99_latency_ms: 125.7
+                    total_requests: 12847
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/metrics/tokens:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Token usage metrics
+      description: |
+        **Tenant API**
+
+        Retrieves detailed token usage metrics for the authenticated tenant
+        including input/output breakdown and average tokens per request.
+      operationId: getTenantTokenMetrics
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: model
+          in: query
+          description: Filter by model name
+          schema:
+            type: string
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [1h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Token metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenMetrics'
+              example:
+                period: "24h"
+                data:
+                  - model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    total_tokens: 8473926
+                    input_tokens: 3284756
+                    output_tokens: 5189170
+                    avg_tokens_per_request: 659.4
+                    total_requests: 12847
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    adminKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: |
+        Admin authentication token for platform management endpoints.
+        All /admin/* endpoints require this token.
+
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key starting with sk-
+      description: |
+        API key for tenant inference endpoints.
+        All /v1/* endpoints require this Bearer token.
+
+  schemas:
+    # =========================================================================
+    # Model Schemas
+    # =========================================================================
+
+    Model:
+      type: object
+      required:
+        - id
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Model name (usually provider/model-name format)
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        family:
+          type: string
+          description: Model family (e.g., llama, gpt, claude, mistral)
+          example: "llama"
+        size:
+          type: string
+          nullable: true
+          description: Model size (e.g., 8B, 70B)
+          example: "8B"
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+          description: Maximum context length in tokens
+          example: 8192
+        vram_required_gb:
+          type: integer
+          description: VRAM required to run the model (GB)
+          example: 16
+        price_input_per_million:
+          type: number
+          format: double
+          description: Price per million input tokens (USD)
+          example: 0.15
+        price_output_per_million:
+          type: number
+          format: double
+          description: Price per million output tokens (USD)
+          example: 0.60
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          description: Expected throughput capacity (tokens/sec)
+          example: 500
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+        metadata:
+          type: object
+          description: Additional model metadata
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ModelCreate:
+      type: object
+      required:
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        family:
+          type: string
+          maxLength: 100
+        size:
+          type: string
+          nullable: true
+          maxLength: 50
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+          minimum: 1
+        vram_required_gb:
+          type: integer
+          minimum: 1
+        price_input_per_million:
+          type: number
+          format: double
+          minimum: 0
+        price_output_per_million:
+          type: number
+          format: double
+          minimum: 0
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+          minimum: 0
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+          default: "active"
+        metadata:
+          type: object
+          default: {}
+
+    ModelUpdate:
+      type: object
+      required:
+        - name
+        - family
+        - type
+        - context_length
+        - vram_required_gb
+        - price_input_per_million
+        - price_output_per_million
+        - status
+      properties:
+        name:
+          type: string
+        family:
+          type: string
+        size:
+          type: string
+          nullable: true
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+        vram_required_gb:
+          type: integer
+        price_input_per_million:
+          type: number
+          format: double
+        price_output_per_million:
+          type: number
+          format: double
+        tokens_per_second_capacity:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          enum: [active, deprecated, beta]
+        metadata:
+          type: object
+
+    ModelListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Model'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # =========================================================================
+    # Node Schemas
+    # =========================================================================
+
+    Node:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        cluster_name:
+          type: string
+          example: "crosslogic-azure-eastus-a10-abc123"
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+        region:
+          type: string
+          example: "eastus"
+        instance_type:
+          type: string
+          example: "Standard_NV36ads_A10_v5"
+        gpu_type:
+          type: string
+          example: "A10"
+        gpu_count:
+          type: integer
+          example: 1
+        model_name:
+          type: string
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        status:
+          type: string
+          enum: [active, draining, terminating, terminated]
+        endpoint_url:
+          type: string
+          example: "http://10.0.1.5:8000"
+        internal_ip:
+          type: string
+          example: "10.0.1.5"
+        health_score:
+          type: number
+          format: float
+          description: Health score from 0-100
+          example: 98.5
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        spot_instance:
+          type: boolean
+        spot_price:
+          type: number
+          format: float
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    NodeLaunchRequest:
+      type: object
+      required:
+        - model_name
+        - provider
+        - region
+      properties:
+        model_name:
+          type: string
+          description: Model to deploy
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+        region:
+          type: string
+          example: "eastus"
+        instance_type:
+          type: string
+          description: Cloud instance type (optional, auto-selected if not provided)
+          example: "Standard_NV36ads_A10_v5"
+        use_spot:
+          type: boolean
+          default: true
+          description: Use spot/preemptible instances for cost savings
+        disk_size_gb:
+          type: integer
+          default: 256
+          description: Disk size in GB
+        vllm_args:
+          type: string
+          description: Additional vLLM arguments
+          example: "--max-model-len 8192 --tensor-parallel-size 1"
+
+    NodeLaunchResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          example: "launch-660e8400"
+        node_id:
+          type: string
+          format: uuid
+        cluster_name:
+          type: string
+        status:
+          type: string
+          example: "launching"
+        model:
+          type: string
+        provider:
+          type: string
+        region:
+          type: string
+        estimated_time:
+          type: string
+          example: "3-5 minutes"
+
+    NodeLaunchStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [launching, loading_model, starting_vllm, registering, completed, failed]
+        stage:
+          type: string
+          description: Current stage description
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Progress percentage
+        stages:
+          type: array
+          items:
+            type: string
+          description: List of stages with status indicators
+        model:
+          type: string
+        elapsed_seconds:
+          type: number
+          description: Time elapsed since launch started
+        error:
+          type: string
+          nullable: true
+          description: Error message if status is failed
+
+    # =========================================================================
+    # Deployment Schemas
+    # =========================================================================
+
+    Deployment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        model_name:
+          type: string
+        model_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [launching, active, scaling, draining, terminated, failed]
+        node_count:
+          type: integer
+          description: Number of nodes in deployment
+        total_capacity_tps:
+          type: integer
+          description: Total capacity in tokens per second
+        endpoint_url:
+          type: string
+          description: Load-balanced inference endpoint URL
+        load_balancing_strategy:
+          type: string
+          enum: [round-robin, least-latency, least-connections, weighted]
+        auto_scaling:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            min_nodes:
+              type: integer
+            max_nodes:
+              type: integer
+            target_latency_ms:
+              type: number
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              cluster_name:
+                type: string
+              status:
+                type: string
+              health_score:
+                type: number
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DeploymentRequest:
+      type: object
+      required:
+        - model_name
+        - provider
+        - region
+      properties:
+        model_name:
+          type: string
+        node_count:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Number of nodes to launch
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+        region:
+          type: string
+        instance_type:
+          type: string
+          description: Optional, auto-selected if not provided
+        use_spot:
+          type: boolean
+          default: true
+        load_balancing_strategy:
+          type: string
+          enum: [round-robin, least-latency, least-connections, weighted]
+          default: "least-latency"
+        auto_scaling:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              default: false
+            min_nodes:
+              type: integer
+              minimum: 1
+            max_nodes:
+              type: integer
+            target_latency_ms:
+              type: number
+              description: Target average latency to maintain
+
+    DeploymentResponse:
+      type: object
+      properties:
+        deployment_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        message:
+          type: string
+        estimated_time:
+          type: string
+        endpoint_url:
+          type: string
+
+    # =========================================================================
+    # Routing Schemas
+    # =========================================================================
+
+    Route:
+      type: object
+      properties:
+        model_id:
+          type: string
+          format: uuid
+        model_name:
+          type: string
+        endpoint_url:
+          type: string
+        strategy:
+          type: string
+          enum: [round-robin, least-latency, least-connections, weighted]
+        healthy_nodes:
+          type: integer
+        total_nodes:
+          type: integer
+        avg_latency_ms:
+          type: number
+          format: float
+        requests_per_second:
+          type: number
+          format: float
+
+    RouteConfig:
+      type: object
+      properties:
+        model_id:
+          type: string
+          format: uuid
+        model_name:
+          type: string
+        strategy:
+          type: string
+          enum: [round-robin, least-latency, least-connections, weighted]
+        health_check:
+          type: object
+          properties:
+            interval_seconds:
+              type: integer
+              description: Health check interval
+            timeout_seconds:
+              type: integer
+              description: Health check timeout
+            unhealthy_threshold:
+              type: integer
+              description: Failures before marking unhealthy
+            healthy_threshold:
+              type: integer
+              description: Successes before marking healthy
+        sticky_sessions:
+          type: boolean
+          description: Enable sticky sessions (route same client to same node)
+        connection_timeout_ms:
+          type: integer
+          description: Connection timeout in milliseconds
+        node_weights:
+          type: object
+          additionalProperties:
+            type: number
+          description: Node weights for weighted strategy (cluster_name -> weight)
+
+    RouteConfigUpdate:
+      type: object
+      properties:
+        strategy:
+          type: string
+          enum: [round-robin, least-latency, least-connections, weighted]
+        health_check:
+          type: object
+          properties:
+            interval_seconds:
+              type: integer
+            timeout_seconds:
+              type: integer
+            unhealthy_threshold:
+              type: integer
+            healthy_threshold:
+              type: integer
+        sticky_sessions:
+          type: boolean
+        connection_timeout_ms:
+          type: integer
+        node_weights:
+          type: object
+          additionalProperties:
+            type: number
+
+    # =========================================================================
+    # Tenant Schemas
+    # =========================================================================
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+          enum: [active, suspended, deleted]
+        tier:
+          type: string
+          enum: [free, pro, enterprise]
+        rate_limit_per_minute:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TenantCreate:
+      type: object
+      required:
+        - name
+        - email
+      properties:
+        name:
+          type: string
+          example: "Acme Corp"
+        email:
+          type: string
+          format: email
+          example: "admin@acme.com"
+        tier:
+          type: string
+          enum: [free, pro, enterprise]
+          default: "free"
+        rate_limit_per_minute:
+          type: integer
+          default: 100
+
+    TenantUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        tier:
+          type: string
+          enum: [free, pro, enterprise]
+        rate_limit_per_minute:
+          type: integer
+        status:
+          type: string
+          enum: [active, suspended, deleted]
+
+    TenantWithAPIKey:
+      type: object
+      properties:
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+        api_key:
+          type: string
+          description: Initial API key (returned only once)
+
+    TenantDetail:
+      allOf:
+        - $ref: '#/components/schemas/Tenant'
+        - type: object
+          properties:
+            total_spend_usd:
+              type: number
+              format: double
+            total_tokens:
+              type: integer
+            total_requests:
+              type: integer
+            api_keys_count:
+              type: integer
+            last_request_at:
+              type: string
+              format: date-time
+
+    TenantUsage:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        total_tokens:
+          type: integer
+        total_requests:
+          type: integer
+        total_cost_usd:
+          type: number
+          format: double
+        by_model:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelUsage'
+        by_date:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimeSeriesUsage'
+
+    # =========================================================================
+    # API Key Schemas
+    # =========================================================================
+
+    APIKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        prefix:
+          type: string
+          description: Key prefix for identification
+          example: "sk-...abc12345"
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [active, revoked]
+        rate_limit_per_minute:
+          type: integer
+
+    # =========================================================================
+    # Endpoint Schemas
+    # =========================================================================
+
+    EndpointInfo:
+      type: object
+      properties:
+        model_id:
+          type: string
+          format: uuid
+        model_name:
+          type: string
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        family:
+          type: string
+          example: "llama"
+        type:
+          type: string
+          enum: [completion, chat, embedding]
+        context_length:
+          type: integer
+          example: 8192
+        price_input_per_million:
+          type: number
+          format: double
+          example: 0.15
+        price_output_per_million:
+          type: number
+          format: double
+          example: 0.60
+        status:
+          type: string
+          enum: [available, unavailable, degraded]
+          description: Endpoint availability status
+        avg_latency_ms:
+          type: number
+          format: float
+          description: Average latency in milliseconds
+        capacity_tps:
+          type: integer
+          description: Total capacity in tokens per second
+        healthy_nodes:
+          type: integer
+          description: Number of healthy nodes serving this model
+        description:
+          type: string
+          description: Model description
+
+    # =========================================================================
+    # Inference Schemas (OpenAI-compatible)
+    # =========================================================================
+
+    ChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        messages:
+          type: array
+          items:
+            type: object
+            required:
+              - role
+              - content
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant]
+              content:
+                type: string
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 2
+          default: 1
+        max_tokens:
+          type: integer
+          minimum: 1
+        stream:
+          type: boolean
+          default: false
+        top_p:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        frequency_penalty:
+          type: number
+          format: float
+          minimum: -2
+          maximum: 2
+        presence_penalty:
+          type: number
+          format: float
+          minimum: -2
+          maximum: 2
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: "chat.completion"
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  content:
+                    type: string
+              finish_reason:
+                type: string
+                enum: [stop, length, content_filter]
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    CompletionRequest:
+      type: object
+      required:
+        - model
+        - prompt
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+        temperature:
+          type: number
+          format: float
+        max_tokens:
+          type: integer
+        top_p:
+          type: number
+          format: float
+        n:
+          type: integer
+        stream:
+          type: boolean
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+
+    CompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: "text_completion"
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              text:
+                type: string
+              index:
+                type: integer
+              finish_reason:
+                type: string
+
+    EmbeddingRequest:
+      type: object
+      required:
+        - model
+        - input
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+
+    EmbeddingResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          example: "list"
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              object:
+                type: string
+                example: "embedding"
+              embedding:
+                type: array
+                items:
+                  type: number
+              index:
+                type: integer
+        model:
+          type: string
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    InferenceModel:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: "model"
+        created:
+          type: integer
+        owned_by:
+          type: string
+
+    # =========================================================================
+    # Usage & Metrics Schemas
+    # =========================================================================
+
+    UsageSummary:
+      type: object
+      properties:
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        total_tokens:
+          type: integer
+        total_requests:
+          type: integer
+        total_cost_usd:
+          type: number
+          format: double
+        by_model:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelUsage'
+
+    ModelUsage:
+      type: object
+      properties:
+        model_name:
+          type: string
+        model_id:
+          type: string
+          format: uuid
+        tokens:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        requests:
+          type: integer
+        cost_usd:
+          type: number
+          format: double
+
+    KeyUsage:
+      type: object
+      properties:
+        api_key_id:
+          type: string
+          format: uuid
+        api_key_name:
+          type: string
+        tokens:
+          type: integer
+        requests:
+          type: integer
+        cost_usd:
+          type: number
+          format: double
+
+    TimeSeriesUsage:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        tokens:
+          type: integer
+        requests:
+          type: integer
+        cost_usd:
+          type: number
+          format: double
+
+    LatencyMetrics:
+      type: object
+      properties:
+        period:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              model_name:
+                type: string
+              avg_latency_ms:
+                type: number
+                format: float
+              p50_latency_ms:
+                type: number
+                format: float
+              p95_latency_ms:
+                type: number
+                format: float
+              p99_latency_ms:
+                type: number
+                format: float
+              total_requests:
+                type: integer
+
+    TokenMetrics:
+      type: object
+      properties:
+        period:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              model_name:
+                type: string
+              total_tokens:
+                type: integer
+              input_tokens:
+                type: integer
+              output_tokens:
+                type: integer
+              avg_tokens_per_request:
+                type: number
+                format: float
+              total_requests:
+                type: integer
+
+    # =========================================================================
+    # Platform Schemas
+    # =========================================================================
+
+    PlatformHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        components:
+          type: object
+          properties:
+            control_plane:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+            database:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+            cache:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+            gpu_nodes:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+        metrics:
+          type: object
+          properties:
+            total_nodes:
+              type: integer
+            healthy_nodes:
+              type: integer
+            unhealthy_nodes:
+              type: integer
+            total_capacity_tps:
+              type: integer
+            current_rps:
+              type: number
+              format: float
+            avg_latency_ms:
+              type: number
+              format: float
+        timestamp:
+          type: string
+          format: date-time
+
+    PlatformMetrics:
+      type: object
+      properties:
+        period:
+          type: string
+        total_requests:
+          type: integer
+        total_tokens:
+          type: integer
+        total_revenue_usd:
+          type: number
+          format: double
+        avg_latency_ms:
+          type: number
+          format: float
+        requests_per_second:
+          type: number
+          format: float
+        total_tenants:
+          type: integer
+        active_tenants:
+          type: integer
+        total_nodes:
+          type: integer
+        total_deployments:
+          type: integer
+        by_model:
+          type: array
+          items:
+            type: object
+            properties:
+              model_name:
+                type: string
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              revenue_usd:
+                type: number
+
+    Region:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+        region_code:
+          type: string
+          example: "eastus"
+        region_name:
+          type: string
+          example: "East US"
+        location:
+          type: string
+          example: "Virginia, USA"
+        is_available:
+          type: boolean
+
+    InstanceType:
+      type: object
+      properties:
+        id:
+          type: integer
+        provider:
+          type: string
+        instance_type:
+          type: string
+          example: "Standard_NV36ads_A10_v5"
+        instance_name:
+          type: string
+          nullable: true
+        vcpu_count:
+          type: integer
+        memory_gb:
+          type: number
+        gpu_count:
+          type: integer
+        gpu_memory_gb:
+          type: number
+        gpu_model:
+          type: string
+          example: "A10"
+        price_per_hour:
+          type: number
+          nullable: true
+        spot_price_per_hour:
+          type: number
+          nullable: true
+        is_available:
+          type: boolean
+        supports_spot:
+          type: boolean
+
+    # =========================================================================
+    # Common Schemas
+    # =========================================================================
+
+    Pagination:
+      type: object
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        has_more:
+          type: boolean
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - type
+            - message
+          properties:
+            type:
+              type: string
+              example: "invalid_request_error"
+            message:
+              type: string
+              example: "Invalid request parameters"
+            field:
+              type: string
+              nullable: true
+            code:
+              type: string
+              example: "INVALID_REQUEST"
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters or body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "validation_error"
+              message: "Field 'name' is required"
+              field: "name"
+              code: "REQUIRED_FIELD"
+
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "authentication_error"
+              message: "Invalid or missing authentication token"
+              code: "UNAUTHORIZED"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "invalid_request_error"
+              message: "Resource not found"
+              code: "NOT_FOUND"
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "rate_limit_error"
+              message: "Rate limit exceeded. Please try again later."
+              code: "RATE_LIMITED"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "api_error"
+              message: "An internal error occurred. Please try again later."
+              code: "INTERNAL_ERROR"
