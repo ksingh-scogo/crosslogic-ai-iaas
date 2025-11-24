@@ -4,23 +4,13 @@ import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import { Toaster } from 'sonner'
-import './styles/globals.css'
+import { ThemeProvider } from '@/context/theme-provider'
+import { FontProvider } from '@/context/font-provider'
+import { DirectionProvider } from '@/context/direction-provider'
+import './styles/index.css'
 
 // Import the generated route tree
 import { routeTree } from './routeTree.gen'
-
-// Create a new router instance
-const router = createRouter({
-  routeTree,
-  defaultPreload: 'intent',
-})
-
-// Register the router instance for type safety
-declare module '@tanstack/react-router' {
-  interface Register {
-    router: typeof router
-  }
-}
 
 // Create a client
 const queryClient = new QueryClient({
@@ -32,15 +22,36 @@ const queryClient = new QueryClient({
   },
 })
 
+// Create a new router instance
+const router = createRouter({
+  routeTree,
+  context: { queryClient },
+  defaultPreload: 'intent',
+  defaultPreloadStaleTime: 0,
+})
+
+// Register the router instance for type safety
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: typeof router
+  }
+}
+
 const rootElement = document.getElementById('root')!
 if (!rootElement.innerHTML) {
   const root = ReactDOM.createRoot(rootElement)
   root.render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-        <Toaster position="top-right" richColors />
-        <ReactQueryDevtools initialIsOpen={false} />
+        <ThemeProvider>
+          <FontProvider>
+            <DirectionProvider>
+              <RouterProvider router={router} />
+              <Toaster position="top-right" richColors />
+              <ReactQueryDevtools initialIsOpen={false} />
+            </DirectionProvider>
+          </FontProvider>
+        </ThemeProvider>
       </QueryClientProvider>
     </StrictMode>
   )

@@ -1,17 +1,45 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { BarChart3, Cpu, DollarSign, Server } from 'lucide-react'
-import { StatCard } from '@/components/common/StatCard'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Activity, CreditCard, DollarSign, Server } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Header } from '@/components/layout/header'
+import { Main } from '@/components/layout/main'
+import { TopNav } from '@/components/layout/top-nav'
+import { ProfileDropdown } from '@/components/profile-dropdown'
+import { Search } from '@/components/search'
+import { ThemeSwitch } from '@/components/theme-switch'
+import { ConfigDrawer } from '@/components/config-drawer'
 import { fetchUsageHistory, fetchNodeSummaries } from '@/lib/api'
+import { UsageChart } from '@/components/dashboard/usage-chart'
+import { RecentActivity } from '@/components/dashboard/recent-activity'
 
 export const Route = createFileRoute('/_authenticated/')({
   component: DashboardPage,
 })
 
 const DEFAULT_TENANT = '00000000-0000-0000-0000-000000000000'
+
+const topNav = [
+  {
+    title: 'Overview',
+    href: '/',
+    isActive: true,
+    disabled: false,
+  },
+  {
+    title: 'Analytics',
+    href: '/analytics',
+    isActive: false,
+    disabled: true,
+  },
+]
 
 function DashboardPage() {
   const { data: usage = [] } = useQuery({
@@ -33,116 +61,110 @@ function DashboardPage() {
   )
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-gray-500 mt-1">Monitor your GPU infrastructure and usage</p>
+    <>
+      {/* ===== Top Heading ===== */}
+      <Header>
+        <TopNav links={topNav} />
+        <div className='ms-auto flex items-center space-x-4'>
+          <Search />
+          <ThemeSwitch />
+          <ConfigDrawer />
+          <ProfileDropdown />
         </div>
-        <div className="flex gap-3">
-          <Button variant="outline">View Documentation</Button>
-          <Button>Launch Instance</Button>
+      </Header>
+
+      {/* ===== Main ===== */}
+      <Main>
+        <div className='mb-2 flex items-center justify-between space-y-2'>
+          <h1 className='text-2xl font-bold tracking-tight'>Dashboard</h1>
+          <div className='flex items-center space-x-2'>
+            <Button>Launch Instance</Button>
+          </div>
         </div>
-      </div>
 
-      {/* Stats Grid */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Total Tokens (24h)"
-          value={totalTokens.toLocaleString()}
-          subtitle="Across all models"
-          icon={BarChart3}
-        />
-        <StatCard
-          title="Total Requests"
-          value={totalRequests.toLocaleString()}
-          subtitle="API calls processed"
-          icon={Cpu}
-        />
-        <StatCard
-          title="Active Nodes"
-          value={`${activeNodes}/${nodes.length}`}
-          subtitle="GPU instances running"
-          icon={Server}
-        />
-        <StatCard
-          title="Total Cost"
-          value={`$${totalCost.toFixed(2)}`}
-          subtitle="Last 24 hours"
-          icon={DollarSign}
-        />
-      </div>
+        <div className='space-y-4'>
+          {/* Stats Cards */}
+          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+            <Card>
+              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                <CardTitle className='text-sm font-medium'>
+                  Total Tokens
+                </CardTitle>
+                <Activity className='text-muted-foreground h-4 w-4' />
+              </CardHeader>
+              <CardContent>
+                <div className='text-2xl font-bold'>{totalTokens.toLocaleString()}</div>
+                <p className='text-muted-foreground text-xs'>
+                  Last 24 hours
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                <CardTitle className='text-sm font-medium'>
+                  Total Requests
+                </CardTitle>
+                <CreditCard className='text-muted-foreground h-4 w-4' />
+              </CardHeader>
+              <CardContent>
+                <div className='text-2xl font-bold'>{totalRequests.toLocaleString()}</div>
+                <p className='text-muted-foreground text-xs'>
+                  API calls processed
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                <CardTitle className='text-sm font-medium'>Active Nodes</CardTitle>
+                <Server className='text-muted-foreground h-4 w-4' />
+              </CardHeader>
+              <CardContent>
+                <div className='text-2xl font-bold'>{activeNodes}</div>
+                <p className='text-muted-foreground text-xs'>
+                  {nodes.length} total nodes
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                <CardTitle className='text-sm font-medium'>
+                  Total Cost
+                </CardTitle>
+                <DollarSign className='text-muted-foreground h-4 w-4' />
+              </CardHeader>
+              <CardContent>
+                <div className='text-2xl font-bold'>${totalCost.toFixed(2)}</div>
+                <p className='text-muted-foreground text-xs'>
+                  Last 24 hours
+                </p>
+              </CardContent>
+            </Card>
+          </div>
 
-      {/* Quick Start */}
-      <Card className="border-sky-200 bg-gradient-to-br from-sky-50 to-blue-50">
-        <CardHeader>
-          <CardTitle className="text-xl">Quick Start Guide</CardTitle>
-          <CardDescription>Get started with CrossLogic GPU Platform</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-start gap-3">
-            <Badge className="mt-0.5">1</Badge>
-            <div>
-              <p className="font-medium">Generate an API Key</p>
-              <p className="text-sm text-gray-600">Create a new API key from the API Keys page</p>
-            </div>
+          {/* Charts */}
+          <div className='grid grid-cols-1 gap-4 lg:grid-cols-7'>
+            <Card className='col-span-1 lg:col-span-4'>
+              <CardHeader>
+                <CardTitle>Usage Overview</CardTitle>
+              </CardHeader>
+              <CardContent className='ps-2'>
+                <UsageChart data={usage} />
+              </CardContent>
+            </Card>
+            <Card className='col-span-1 lg:col-span-3'>
+              <CardHeader>
+                <CardTitle>Recent Activity</CardTitle>
+                <CardDescription>
+                  Latest usage data points
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RecentActivity usage={usage.slice(0, 5)} />
+              </CardContent>
+            </Card>
           </div>
-          <div className="flex items-start gap-3">
-            <Badge className="mt-0.5">2</Badge>
-            <div>
-              <p className="font-medium">Launch a GPU Instance</p>
-              <p className="text-sm text-gray-600">Deploy your AI model on cloud GPUs</p>
-            </div>
-          </div>
-          <div className="flex items-start gap-3">
-            <Badge className="mt-0.5">3</Badge>
-            <div>
-              <p className="font-medium">Make Your First Request</p>
-              <p className="text-sm text-gray-600">Use the OpenAI-compatible API to run inference</p>
-            </div>
-          </div>
-          <div className="mt-4 rounded-lg bg-slate-900 p-4 font-mono text-sm text-green-400">
-            <code>
-              {`curl https://api.crosslogic.ai/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -d '{"model": "mixtral-8x7b", "messages": [...]}'`}
-            </code>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Recent Usage */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent Usage</CardTitle>
-          <CardDescription>Last 10 hourly data points</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="border-b">
-                <tr className="text-left">
-                  <th className="pb-3 font-medium text-gray-600">Timestamp</th>
-                  <th className="pb-3 font-medium text-gray-600 text-right">Tokens</th>
-                  <th className="pb-3 font-medium text-gray-600 text-right">Requests</th>
-                  <th className="pb-3 font-medium text-gray-600 text-right">Cost</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {usage.slice(0, 10).map((point) => (
-                  <tr key={point.timestamp} className="text-gray-900">
-                    <td className="py-3">{new Date(point.timestamp).toLocaleString()}</td>
-                    <td className="py-3 text-right font-mono">{point.totalTokens.toLocaleString()}</td>
-                    <td className="py-3 text-right font-mono">{point.requests || 0}</td>
-                    <td className="py-3 text-right font-mono text-green-600">{point.totalCost}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+        </div>
+      </Main>
+    </>
   )
 }

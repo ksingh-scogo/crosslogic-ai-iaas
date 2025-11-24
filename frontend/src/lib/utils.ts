@@ -5,41 +5,56 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function formatDate(date: string | Date): string {
-  return new Date(date).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+export function sleep(ms: number = 1000) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export function formatRelativeTime(date: string | Date): string {
-  const now = new Date()
-  const then = new Date(date)
-  const seconds = Math.floor((now.getTime() - then.getTime()) / 1000)
+/**
+ * Generates page numbers for pagination with ellipsis
+ * @param currentPage - Current page number (1-based)
+ * @param totalPages - Total number of pages
+ * @returns Array of page numbers and ellipsis strings
+ *
+ * Examples:
+ * - Small dataset (≤5 pages): [1, 2, 3, 4, 5]
+ * - Near beginning: [1, 2, 3, 4, '...', 10]
+ * - In middle: [1, '...', 4, 5, 6, '...', 10]
+ * - Near end: [1, '...', 7, 8, 9, 10]
+ */
+export function getPageNumbers(currentPage: number, totalPages: number) {
+  const maxVisiblePages = 5 // Maximum number of page buttons to show
+  const rangeWithDots = []
 
-  if (seconds < 60) return 'just now'
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`
-  return formatDate(date)
-}
+  if (totalPages <= maxVisiblePages) {
+    // If total pages is 5 or less, show all pages
+    for (let i = 1; i <= totalPages; i++) {
+      rangeWithDots.push(i)
+    }
+  } else {
+    // Always show first page
+    rangeWithDots.push(1)
 
-export function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  }).format(amount)
-}
+    if (currentPage <= 3) {
+      // Near the beginning: [1] [2] [3] [4] ... [10]
+      for (let i = 2; i <= 4; i++) {
+        rangeWithDots.push(i)
+      }
+      rangeWithDots.push('...', totalPages)
+    } else if (currentPage >= totalPages - 2) {
+      // Near the end: [1] ... [7] [8] [9] [10]
+      rangeWithDots.push('...')
+      for (let i = totalPages - 3; i <= totalPages; i++) {
+        rangeWithDots.push(i)
+      }
+    } else {
+      // In the middle: [1] ... [4] [5] [6] ... [10]
+      rangeWithDots.push('...')
+      for (let i = currentPage - 1; i <= currentPage + 1; i++) {
+        rangeWithDots.push(i)
+      }
+      rangeWithDots.push('...', totalPages)
+    }
+  }
 
-export function formatNumber(num: number): string {
-  return new Intl.NumberFormat('en-US').format(num)
-}
-
-export function copyToClipboard(text: string): Promise<void> {
-  return navigator.clipboard.writeText(text)
+  return rangeWithDots
 }

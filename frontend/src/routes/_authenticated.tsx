@@ -1,5 +1,5 @@
 import { createFileRoute, Outlet, redirect } from '@tanstack/react-router'
-import { Layout } from '@/components/layout/Layout'
+import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
 import { useAuthStore } from '@/stores/auth'
 
 export const Route = createFileRoute('/_authenticated')({
@@ -11,13 +11,9 @@ export const Route = createFileRoute('/_authenticated')({
       })
     }
   },
-  component: AuthenticatedLayout,
-})
-
-function AuthenticatedLayout() {
-  return (
-    <Layout>
+  component: () => (
+    <AuthenticatedLayout>
       <Outlet />
-    </Layout>
-  )
-}
+    </AuthenticatedLayout>
+  ),
+})
