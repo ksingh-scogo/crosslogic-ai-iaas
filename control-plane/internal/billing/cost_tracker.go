@@ -141,18 +141,16 @@ func (ct *CostTracker) GetTenantCosts(ctx context.Context, tenantID string, star
 	query := `
 		SELECT
 			n.gpu_type,
-			n.gpu_count,
 			n.spot_instance,
 			EXTRACT(EPOCH FROM (COALESCE(n.terminated_at, NOW()) - n.created_at)) / 3600.0 as hours,
 			COALESCE(SUM(ur.prompt_tokens), 0) as input_tokens,
 			COALESCE(SUM(ur.completion_tokens), 0) as output_tokens,
 			COALESCE(COUNT(ur.id), 0) as request_count
-		FROM nodes n
-		LEFT JOIN usage_records ur ON ur.node_id = n.id
-			AND ur.created_at BETWEEN $2 AND $3
-		WHERE n.tenant_id = $1
-			AND n.created_at BETWEEN $2 AND $3
-		GROUP BY n.id, n.gpu_type, n.gpu_count, n.spot_instance, n.created_at, n.terminated_at
+		FROM usage_records ur
+		INNER JOIN nodes n ON ur.node_id = n.id
+		WHERE ur.tenant_id = $1
+			AND ur.timestamp BETWEEN $2 AND $3
+		GROUP BY n.id, n.gpu_type, n.spot_instance, n.created_at, n.terminated_at
 	`
 
 	rows, err := ct.db.Pool.Query(ctx, query, tenantID, startTime, endTime)

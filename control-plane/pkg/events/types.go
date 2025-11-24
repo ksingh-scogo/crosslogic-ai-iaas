@@ -7,9 +7,11 @@ type EventType string
 
 const (
 	// Tenant events
-	EventTenantCreated EventType = "tenant.created"
-	EventTenantUpdated EventType = "tenant.updated"
-	EventTenantDeleted EventType = "tenant.deleted"
+	EventTenantCreated   EventType = "tenant.created"
+	EventTenantUpdated   EventType = "tenant.updated"
+	EventTenantDeleted   EventType = "tenant.deleted"
+	EventTenantSuspended EventType = "tenant.suspended"
+	EventTenantActivated EventType = "tenant.activated"
 
 	// Payment events
 	EventPaymentSucceeded EventType = "payment.succeeded"

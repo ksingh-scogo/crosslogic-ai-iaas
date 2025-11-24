@@ -164,6 +164,9 @@ func (g *Gateway) setupRoutes() {
 		r.Get("/admin/instances/status", g.GetLaunchStatusHandler)
 		r.Get("/admin/regions", g.ListRegionsHandler)
 		r.Get("/admin/instance-types", g.ListInstanceTypesHandler)
+
+		// === EXTENDED ADMIN ROUTES ===
+		g.setupExtendedRoutes(r)
 	})
 
 	// === TENANT (CUSTOMER) APIs (Bearer token auth) ===
@@ -196,6 +199,9 @@ func (g *Gateway) setupRoutes() {
 		// Tenant - Metrics
 		r.Get("/v1/metrics/latency", g.handleGetLatencyMetrics)
 		r.Get("/v1/metrics/tokens", g.handleGetTokenMetrics)
+
+		// === EXTENDED TENANT ROUTES ===
+		g.setupExtendedTenantRoutes(r)
 	})
 }
 

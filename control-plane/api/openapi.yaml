@@ -1530,6 +1530,426 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+    delete:
+      tags:
+        - Admin - Tenants
+      summary: Soft delete tenant
+      description: |
+        **Platform Admin Only**
+
+        Soft deletes a tenant account by marking it as deleted. This does not
+        remove the tenant from the database but sets its status to 'deleted'.
+        API keys are automatically revoked and no further API access is permitted.
+      operationId: deleteAdminTenant
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Tenant successfully deleted"
+                  tenant_id:
+                    type: string
+                    format: uuid
+              example:
+                message: "Tenant successfully deleted"
+                tenant_id: "880e8400-e29b-41d4-a716-446655440003"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Tenant already deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/suspend:
+    post:
+      tags:
+        - Admin - Tenants
+      summary: Suspend tenant account
+      description: |
+        **Platform Admin Only**
+
+        Suspends a tenant account. Suspended tenants cannot make API calls
+        and all API keys are temporarily deactivated. Use this for billing
+        issues or policy violations. Can be reversed with activate endpoint.
+      operationId: suspendAdminTenant
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Reason for suspension
+                  example: "Payment overdue"
+                notes:
+                  type: string
+                  description: Internal notes
+            example:
+              reason: "Payment overdue"
+              notes: "Account suspended until invoice #12345 is paid"
+      responses:
+        '200':
+          description: Tenant suspended successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+              example:
+                id: "880e8400-e29b-41d4-a716-446655440003"
+                name: "Acme Corp"
+                email: "admin@acme.com"
+                status: "suspended"
+                tier: "pro"
+                created_at: "2024-01-10T10:00:00Z"
+                updated_at: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Tenant already suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/activate:
+    post:
+      tags:
+        - Admin - Tenants
+      summary: Activate/reactivate tenant account
+      description: |
+        **Platform Admin Only**
+
+        Activates or reactivates a suspended tenant account. This restores
+        API access and reactivates all non-revoked API keys. Use this to
+        restore service after suspension.
+      operationId: activateAdminTenant
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notes:
+                  type: string
+                  description: Internal notes about reactivation
+            example:
+              notes: "Payment received, service restored"
+      responses:
+        '200':
+          description: Tenant activated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+              example:
+                id: "880e8400-e29b-41d4-a716-446655440003"
+                name: "Acme Corp"
+                email: "admin@acme.com"
+                status: "active"
+                tier: "pro"
+                created_at: "2024-01-10T10:00:00Z"
+                updated_at: "2024-01-15T10:35:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Tenant already active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/api-keys:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: List all API keys for tenant
+      description: |
+        **Platform Admin Only**
+
+        Retrieves all API keys (active and revoked) for a specific tenant.
+        Useful for auditing and managing tenant access.
+      operationId: listAdminTenantAPIKeys
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          description: Filter by key status
+          schema:
+            type: string
+            enum: [active, revoked]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/APIKey'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+              example:
+                data:
+                  - id: "123e4567-e89b-12d3-a456-426614174001"
+                    name: "Production API Key"
+                    prefix: "sk-...abc12345"
+                    created_at: "2024-01-10T10:00:00Z"
+                    last_used_at: "2024-01-15T10:30:00Z"
+                    status: "active"
+                    rate_limit_per_minute: 1000
+                  - id: "123e4567-e89b-12d3-a456-426614174002"
+                    name: "Development API Key"
+                    prefix: "sk-...xyz98765"
+                    created_at: "2024-01-12T14:20:00Z"
+                    last_used_at: "2024-01-14T09:15:00Z"
+                    status: "active"
+                    rate_limit_per_minute: 100
+                pagination:
+                  total: 5
+                  limit: 50
+                  offset: 0
+                  has_more: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/deployments:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: List all deployments for tenant
+      description: |
+        **Platform Admin Only**
+
+        Retrieves deployment activity and history for a specific tenant.
+        Shows which models the tenant has used and when.
+      operationId: listAdminTenantDeployments
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+        - name: start_date
+          in: query
+          description: Filter deployments from this date
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          description: Filter deployments to this date
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of tenant deployment activity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        model_name:
+                          type: string
+                          example: "meta-llama/Llama-3.1-8B-Instruct"
+                        first_used_at:
+                          type: string
+                          format: date-time
+                        last_used_at:
+                          type: string
+                          format: date-time
+                        total_requests:
+                          type: integer
+                        total_tokens:
+                          type: integer
+                        total_cost_usd:
+                          type: number
+                          format: double
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+              example:
+                data:
+                  - model_name: "meta-llama/Llama-3.1-8B-Instruct"
+                    first_used_at: "2024-01-10T10:00:00Z"
+                    last_used_at: "2024-01-15T10:30:00Z"
+                    total_requests: 42847
+                    total_tokens: 15847392
+                    total_cost_usd: 247.85
+                  - model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+                    first_used_at: "2024-01-11T08:00:00Z"
+                    last_used_at: "2024-01-15T09:20:00Z"
+                    total_requests: 5234
+                    total_tokens: 2145678
+                    total_cost_usd: 52.34
+                pagination:
+                  total: 2
+                  limit: 50
+                  offset: 0
+                  has_more: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/tenants/{id}/usage/detailed:
+    get:
+      tags:
+        - Admin - Tenants
+      summary: Get comprehensive usage report for tenant
+      description: |
+        **Platform Admin Only**
+
+        Retrieves an exhaustive usage report for a tenant including all dimensions:
+        tokens, costs, performance metrics, error rates, and breakdowns by model,
+        API key, time period, and region.
+      operationId: getAdminTenantDetailedUsage
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant UUID
+          schema:
+            type: string
+            format: uuid
+        - name: start_date
+          in: query
+          required: true
+          description: Start date for usage report (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          required: true
+          description: End date for usage report (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: group_by
+          in: query
+          description: Group usage data by dimension
+          schema:
+            type: string
+            enum: [model, api_key, region, hour, day]
+            default: day
+      responses:
+        '200':
+          description: Comprehensive usage report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedUsageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   # ---------------------------------------------------------------------------
   # Admin - Platform
   # ---------------------------------------------------------------------------
@@ -1644,6 +2064,236 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+    post:
+      tags:
+        - Admin - Platform
+      summary: Add new region
+      description: |
+        **Platform Admin Only**
+
+        Adds a new cloud region to the platform. This makes the region
+        available for node launches and deployment selection.
+      operationId: createAdminRegion
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegionCreate'
+            example:
+              code: "us-west-2"
+              name: "US West (Oregon)"
+              provider: "aws"
+              location: "North America"
+              available: true
+              pricing_multiplier: 1.0
+              metadata:
+                datacenter: "AWS PDX"
+                compliance: ["SOC2", "HIPAA"]
+      responses:
+        '201':
+          description: Region created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Region'
+              example:
+                id: "780e8400-e29b-41d4-a716-446655440099"
+                provider: "aws"
+                region_code: "us-west-2"
+                region_name: "US West (Oregon)"
+                location: "North America"
+                is_available: true
+                pricing_multiplier: 1.0
+                created_at: "2024-01-15T10:30:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Region already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/regions/{id}:
+    put:
+      tags:
+        - Admin - Platform
+      summary: Update region configuration
+      description: |
+        **Platform Admin Only**
+
+        Updates region configuration including availability status and pricing.
+        Use this to enable/disable regions or adjust regional pricing.
+      operationId: updateAdminRegion
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Region UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegionUpdate'
+            example:
+              is_available: false
+              pricing_multiplier: 1.15
+              metadata:
+                maintenance_scheduled: "2024-02-01"
+      responses:
+        '200':
+          description: Region updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Region'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Admin - Platform
+      summary: Remove region
+      description: |
+        **Platform Admin Only**
+
+        Removes a region from the platform. This prevents new deployments
+        to this region. Existing nodes in the region are not affected but
+        should be migrated before deletion.
+      operationId: deleteAdminRegion
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Region UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Region deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Region successfully deleted"
+                  region_id:
+                    type: string
+                    format: uuid
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Region has active nodes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: "conflict_error"
+                  message: "Cannot delete region with active nodes. Please terminate all nodes first."
+                  code: "REGION_HAS_ACTIVE_NODES"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/regions/{id}/availability:
+    get:
+      tags:
+        - Admin - Platform
+      summary: Check region availability
+      description: |
+        **Platform Admin Only**
+
+        Checks real-time availability of a region including quota limits,
+        available instance types, and current capacity.
+      operationId: getAdminRegionAvailability
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Region UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Region availability status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  region_id:
+                    type: string
+                    format: uuid
+                  region_code:
+                    type: string
+                  is_available:
+                    type: boolean
+                  available_instance_types:
+                    type: array
+                    items:
+                      type: string
+                  quota_limits:
+                    type: object
+                    properties:
+                      max_vcpus:
+                        type: integer
+                      max_gpus:
+                        type: integer
+                      current_vcpus:
+                        type: integer
+                      current_gpus:
+                        type: integer
+                  estimated_launch_time_minutes:
+                    type: integer
+                    description: Estimated time to launch a node
+              example:
+                region_id: "780e8400-e29b-41d4-a716-446655440099"
+                region_code: "us-west-2"
+                is_available: true
+                available_instance_types: ["g5.xlarge", "g5.2xlarge", "p4d.24xlarge"]
+                quota_limits:
+                  max_vcpus: 256
+                  max_gpus: 64
+                  current_vcpus: 48
+                  current_gpus: 8
+                estimated_launch_time_minutes: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /admin/instance-types:
     get:
       tags:
@@ -1688,6 +2338,341 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Admin - Platform
+      summary: Add new instance type
+      description: |
+        **Platform Admin Only**
+
+        Adds a new GPU instance type to the platform catalog. This makes
+        the instance type available for node launches.
+      operationId: createAdminInstanceType
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceTypeCreate'
+            example:
+              name: "g5.xlarge"
+              gpu_type: "NVIDIA A10G"
+              gpu_count: 1
+              vram_gb: 24
+              cpu_cores: 4
+              ram_gb: 16
+              provider: "aws"
+              on_demand_price_usd_per_hour: 1.006
+              spot_price_usd_per_hour: 0.302
+              available: true
+              supports_spot: true
+              metadata:
+                network_bandwidth_gbps: 10
+                storage_type: "NVMe SSD"
+      responses:
+        '201':
+          description: Instance type created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+              example:
+                id: 42
+                provider: "aws"
+                instance_type: "g5.xlarge"
+                instance_name: "AWS G5 XLarge"
+                vcpu_count: 4
+                memory_gb: 16
+                gpu_count: 1
+                gpu_memory_gb: 24
+                gpu_model: "NVIDIA A10G"
+                price_per_hour: 1.006
+                spot_price_per_hour: 0.302
+                is_available: true
+                supports_spot: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Instance type already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/instance-types/{id}:
+    put:
+      tags:
+        - Admin - Platform
+      summary: Update instance type
+      description: |
+        **Platform Admin Only**
+
+        Updates instance type configuration including pricing and availability.
+        Use this to adjust pricing, enable/disable instance types, or update
+        specifications.
+      operationId: updateAdminInstanceType
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Instance type ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceTypeUpdate'
+            example:
+              on_demand_price_usd_per_hour: 1.106
+              spot_price_usd_per_hour: 0.332
+              available: true
+      responses:
+        '200':
+          description: Instance type updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Admin - Platform
+      summary: Remove instance type
+      description: |
+        **Platform Admin Only**
+
+        Removes an instance type from the platform catalog. This prevents
+        new deployments using this instance type. Existing nodes are not affected.
+      operationId: deleteAdminInstanceType
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Instance type ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Instance type deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Instance type successfully deleted"
+                  instance_type_id:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Instance type has active nodes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: "conflict_error"
+                  message: "Cannot delete instance type with active nodes"
+                  code: "INSTANCE_TYPE_HAS_ACTIVE_NODES"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/instance-types/{id}/regions:
+    post:
+      tags:
+        - Admin - Platform
+      summary: Associate instance type with regions
+      description: |
+        **Platform Admin Only**
+
+        Associates an instance type with one or more regions, making it
+        available for deployments in those regions.
+      operationId: associateInstanceTypeRegions
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Instance type ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - region_ids
+              properties:
+                region_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: List of region UUIDs to associate
+            example:
+              region_ids:
+                - "780e8400-e29b-41d4-a716-446655440099"
+                - "780e8400-e29b-41d4-a716-446655440088"
+      responses:
+        '200':
+          description: Regions associated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Instance type associated with 2 regions"
+                  instance_type_id:
+                    type: integer
+                  region_count:
+                    type: integer
+              example:
+                message: "Instance type associated with 2 regions"
+                instance_type_id: 42
+                region_count: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/instance-types/{id}/pricing:
+    get:
+      tags:
+        - Admin - Platform
+      summary: Get detailed pricing for instance type
+      description: |
+        **Platform Admin Only**
+
+        Retrieves detailed pricing information for an instance type including
+        regional variations, spot pricing history, and cost comparisons.
+      operationId: getInstanceTypePricing
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Instance type ID
+          schema:
+            type: integer
+        - name: region
+          in: query
+          description: Filter by specific region
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Detailed pricing information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance_type_id:
+                    type: integer
+                  instance_type:
+                    type: string
+                  base_on_demand_price:
+                    type: number
+                    format: double
+                  base_spot_price:
+                    type: number
+                    format: double
+                  regional_pricing:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        region_code:
+                          type: string
+                        region_name:
+                          type: string
+                        on_demand_price:
+                          type: number
+                          format: double
+                        spot_price:
+                          type: number
+                          format: double
+                        spot_price_savings_percent:
+                          type: number
+                          format: double
+                  spot_price_history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        timestamp:
+                          type: string
+                          format: date-time
+                        spot_price:
+                          type: number
+                          format: double
+                        region_code:
+                          type: string
+              example:
+                instance_type_id: 42
+                instance_type: "g5.xlarge"
+                base_on_demand_price: 1.006
+                base_spot_price: 0.302
+                regional_pricing:
+                  - region_code: "us-east-1"
+                    region_name: "US East (N. Virginia)"
+                    on_demand_price: 1.006
+                    spot_price: 0.302
+                    spot_price_savings_percent: 70.0
+                  - region_code: "us-west-2"
+                    region_name: "US West (Oregon)"
+                    on_demand_price: 1.006
+                    spot_price: 0.315
+                    spot_price_savings_percent: 68.7
+                spot_price_history:
+                  - timestamp: "2024-01-15T10:00:00Z"
+                    spot_price: 0.302
+                    region_code: "us-east-1"
+                  - timestamp: "2024-01-15T09:00:00Z"
+                    spot_price: 0.298
+                    region_code: "us-east-1"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -2417,6 +3402,488 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  # ---------------------------------------------------------------------------
+  # Tenant - Advanced Usage Analytics
+  # ---------------------------------------------------------------------------
+
+  /v1/usage/detailed:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Get detailed usage with all dimensions
+      description: |
+        **Tenant API**
+
+        Retrieves comprehensive usage data with granular per-request details
+        including timestamps, latency, tokens, costs, and all metadata dimensions.
+        Perfect for building detailed usage dashboards and analytics.
+      operationId: getTenantDetailedUsage
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          description: Start date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          required: true
+          description: End date for usage data (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: model_id
+          in: query
+          description: Filter by specific model UUID
+          schema:
+            type: string
+            format: uuid
+        - name: api_key_id
+          in: query
+          description: Filter by specific API key UUID
+          schema:
+            type: string
+            format: uuid
+        - name: group_by
+          in: query
+          description: Group usage data by dimension
+          schema:
+            type: string
+            enum: [model, api_key, region, hour, day]
+            default: day
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Detailed usage data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedUsageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-hour:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Hourly usage breakdown
+      description: |
+        **Tenant API**
+
+        Retrieves usage data aggregated by hour for the last 24 hours.
+        Useful for identifying peak usage times and traffic patterns.
+      operationId: getTenantUsageByHour
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: hours
+          in: query
+          description: Number of hours to retrieve (default 24, max 168)
+          schema:
+            type: integer
+            default: 24
+            maximum: 168
+      responses:
+        '200':
+          description: Hourly usage breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "last_24_hours"
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TimeSeriesUsage'
+              example:
+                period: "last_24_hours"
+                data:
+                  - timestamp: "2024-01-15T10:00:00Z"
+                    tokens: 342156
+                    requests: 518
+                    cost_usd: 5.34
+                    avg_latency_ms: 45.2
+                  - timestamp: "2024-01-15T11:00:00Z"
+                    tokens: 389427
+                    requests: 592
+                    cost_usd: 6.08
+                    avg_latency_ms: 43.8
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-day:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Daily usage breakdown
+      description: |
+        **Tenant API**
+
+        Retrieves usage data aggregated by day for the last 30 days.
+        Ideal for trending analysis and monthly reporting.
+      operationId: getTenantUsageByDay
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: days
+          in: query
+          description: Number of days to retrieve (default 30, max 90)
+          schema:
+            type: integer
+            default: 30
+            maximum: 90
+      responses:
+        '200':
+          description: Daily usage breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "last_30_days"
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TimeSeriesUsage'
+              example:
+                period: "last_30_days"
+                data:
+                  - timestamp: "2024-01-14T00:00:00Z"
+                    tokens: 8234567
+                    requests: 12487
+                    cost_usd: 128.56
+                    avg_latency_ms: 44.7
+                  - timestamp: "2024-01-15T00:00:00Z"
+                    tokens: 9145678
+                    requests: 13892
+                    cost_usd: 142.89
+                    avg_latency_ms: 46.2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-week:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Weekly usage breakdown
+      description: |
+        **Tenant API**
+
+        Retrieves usage data aggregated by week for the last 12 weeks.
+        Perfect for quarterly reviews and medium-term trend analysis.
+      operationId: getTenantUsageByWeek
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: weeks
+          in: query
+          description: Number of weeks to retrieve (default 12, max 52)
+          schema:
+            type: integer
+            default: 12
+            maximum: 52
+      responses:
+        '200':
+          description: Weekly usage breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "last_12_weeks"
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        week_start:
+                          type: string
+                          format: date-time
+                        week_end:
+                          type: string
+                          format: date-time
+                        tokens:
+                          type: integer
+                        requests:
+                          type: integer
+                        cost_usd:
+                          type: number
+                          format: double
+                        avg_latency_ms:
+                          type: number
+                          format: float
+              example:
+                period: "last_12_weeks"
+                data:
+                  - week_start: "2024-01-08T00:00:00Z"
+                    week_end: "2024-01-14T23:59:59Z"
+                    tokens: 54238756
+                    requests: 82347
+                    cost_usd: 847.23
+                    avg_latency_ms: 45.8
+                  - week_start: "2024-01-15T00:00:00Z"
+                    week_end: "2024-01-21T23:59:59Z"
+                    tokens: 61345678
+                    requests: 93127
+                    cost_usd: 958.34
+                    avg_latency_ms: 44.2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/usage/by-month:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Monthly usage breakdown
+      description: |
+        **Tenant API**
+
+        Retrieves usage data aggregated by month for the last 12 months.
+        Essential for annual reporting and long-term trend analysis.
+      operationId: getTenantUsageByMonth
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: months
+          in: query
+          description: Number of months to retrieve (default 12, max 24)
+          schema:
+            type: integer
+            default: 12
+            maximum: 24
+      responses:
+        '200':
+          description: Monthly usage breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "last_12_months"
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        month:
+                          type: string
+                          example: "2024-01"
+                        month_start:
+                          type: string
+                          format: date-time
+                        month_end:
+                          type: string
+                          format: date-time
+                        tokens:
+                          type: integer
+                        requests:
+                          type: integer
+                        cost_usd:
+                          type: number
+                          format: double
+                        avg_latency_ms:
+                          type: number
+                          format: float
+              example:
+                period: "last_12_months"
+                data:
+                  - month: "2023-12"
+                    month_start: "2023-12-01T00:00:00Z"
+                    month_end: "2023-12-31T23:59:59Z"
+                    tokens: 234567890
+                    requests: 356234
+                    cost_usd: 3661.23
+                    avg_latency_ms: 46.5
+                  - month: "2024-01"
+                    month_start: "2024-01-01T00:00:00Z"
+                    month_end: "2024-01-31T23:59:59Z"
+                    tokens: 267834512
+                    requests: 407123
+                    cost_usd: 4182.56
+                    avg_latency_ms: 44.8
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Performance Metrics
+  # ---------------------------------------------------------------------------
+
+  /v1/metrics/performance:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Comprehensive performance metrics
+      description: |
+        **Tenant API**
+
+        Retrieves comprehensive performance metrics including throughput (TPS),
+        latency percentiles, success rates, cache hit rates, and token efficiency.
+        Inspired by metrics from OpenAI, Anthropic, and Cohere dashboards.
+      operationId: getTenantPerformanceMetrics
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          description: Start date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          required: true
+          description: End date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: model_id
+          in: query
+          description: Filter by specific model
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Performance metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceMetricsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/metrics/throughput:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Throughput metrics
+      description: |
+        **Tenant API**
+
+        Retrieves throughput metrics including total requests per period,
+        peak RPS (requests per second), average tokens per request, and
+        cached vs uncached request distribution.
+      operationId: getTenantThroughputMetrics
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          description: Start date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          required: true
+          description: End date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: granularity
+          in: query
+          description: Time granularity for aggregation
+          schema:
+            type: string
+            enum: [minute, hour, day]
+            default: hour
+      responses:
+        '200':
+          description: Throughput metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThroughputMetricsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/metrics/by-model:
+    get:
+      tags:
+        - Tenant - Usage & Billing
+      summary: Per-model metrics breakdown
+      description: |
+        **Tenant API**
+
+        Retrieves detailed metrics broken down by model including tokens processed,
+        average latency, costs, usage distribution, and performance comparisons.
+        Useful for understanding which models perform best for your use case.
+      operationId: getTenantMetricsByModel
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          description: Start date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          required: true
+          description: End date for metrics (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Model-specific metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelMetricsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
 components:
   securitySchemes:
     adminKeyAuth:
@@ -3027,14 +4494,32 @@ components:
       properties:
         name:
           type: string
+          description: Tenant display name
         tier:
           type: string
-          enum: [free, pro, enterprise]
+          enum: [free, starter, pro, enterprise]
+          description: Billing tier
+        max_requests_per_minute:
+          type: integer
+          description: Rate limit (requests per minute)
         rate_limit_per_minute:
           type: integer
+          description: Legacy rate limit field (deprecated, use max_requests_per_minute)
+        max_monthly_spend_usd:
+          type: number
+          format: double
+          description: Maximum monthly spending cap in USD
+        billing_email:
+          type: string
+          format: email
+          description: Billing contact email
         status:
           type: string
           enum: [active, suspended, deleted]
+          description: Account status
+        metadata:
+          type: object
+          description: Custom metadata for the tenant
 
     TenantWithAPIKey:
       type: object
@@ -3604,6 +5089,74 @@ components:
           example: "Virginia, USA"
         is_available:
           type: boolean
+        pricing_multiplier:
+          type: number
+          format: double
+          default: 1.0
+          description: Regional pricing adjustment multiplier
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          description: Additional region metadata
+
+    RegionCreate:
+      type: object
+      required:
+        - code
+        - name
+        - provider
+        - location
+      properties:
+        code:
+          type: string
+          example: "us-east-1"
+          description: Cloud provider region code
+        name:
+          type: string
+          example: "US East (N. Virginia)"
+          description: Human-readable region name
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+          description: Cloud provider
+        location:
+          type: string
+          example: "North America"
+          description: Geographic location
+        available:
+          type: boolean
+          default: true
+          description: Whether region is available for deployments
+        pricing_multiplier:
+          type: number
+          format: double
+          default: 1.0
+          description: Regional price adjustment (e.g., 1.15 = 15% more expensive)
+        metadata:
+          type: object
+          description: Custom metadata for the region
+
+    RegionUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable region name
+        is_available:
+          type: boolean
+          description: Whether region is available for deployments
+        pricing_multiplier:
+          type: number
+          format: double
+          description: Regional price adjustment multiplier
+        metadata:
+          type: object
+          description: Custom metadata for the region
 
     InstanceType:
       type: object
@@ -3639,6 +5192,408 @@ components:
           type: boolean
         supports_spot:
           type: boolean
+
+    InstanceTypeCreate:
+      type: object
+      required:
+        - name
+        - gpu_type
+        - gpu_count
+        - provider
+      properties:
+        name:
+          type: string
+          example: "g5.xlarge"
+          description: Instance type identifier
+        gpu_type:
+          type: string
+          example: "NVIDIA A10G"
+          description: GPU model/type
+        gpu_count:
+          type: integer
+          example: 1
+          description: Number of GPUs
+        vram_gb:
+          type: integer
+          example: 24
+          description: VRAM per GPU in GB
+        cpu_cores:
+          type: integer
+          example: 4
+          description: Number of CPU cores
+        ram_gb:
+          type: integer
+          example: 16
+          description: System RAM in GB
+        provider:
+          type: string
+          enum: [aws, azure, gcp]
+          description: Cloud provider
+        on_demand_price_usd_per_hour:
+          type: number
+          format: double
+          description: On-demand hourly price in USD
+        spot_price_usd_per_hour:
+          type: number
+          format: double
+          description: Spot/preemptible hourly price in USD
+        available:
+          type: boolean
+          default: true
+          description: Whether instance type is available
+        supports_spot:
+          type: boolean
+          default: true
+          description: Whether spot instances are supported
+        metadata:
+          type: object
+          description: Additional instance type metadata
+
+    InstanceTypeUpdate:
+      type: object
+      properties:
+        on_demand_price_usd_per_hour:
+          type: number
+          format: double
+          description: On-demand hourly price in USD
+        spot_price_usd_per_hour:
+          type: number
+          format: double
+          description: Spot/preemptible hourly price in USD
+        available:
+          type: boolean
+          description: Whether instance type is available
+        supports_spot:
+          type: boolean
+          description: Whether spot instances are supported
+        metadata:
+          type: object
+          description: Additional instance type metadata
+
+    # =========================================================================
+    # Advanced Usage & Metrics Schemas
+    # =========================================================================
+
+    DetailedUsageResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        summary:
+          type: object
+          properties:
+            total_requests:
+              type: integer
+              description: Total number of requests
+            successful_requests:
+              type: integer
+              description: Number of successful requests
+            failed_requests:
+              type: integer
+              description: Number of failed requests
+            total_tokens:
+              type: integer
+              description: Total tokens processed
+            prompt_tokens:
+              type: integer
+              description: Total input/prompt tokens
+            completion_tokens:
+              type: integer
+              description: Total output/completion tokens
+            cached_tokens:
+              type: integer
+              description: Total cached tokens
+            cache_hit_rate:
+              type: number
+              format: double
+              description: Cache hit rate as percentage
+            total_cost_usd:
+              type: number
+              format: double
+              description: Total cost in USD
+        performance:
+          type: object
+          properties:
+            avg_latency_ms:
+              type: number
+              format: double
+              description: Average latency in milliseconds
+            p50_latency_ms:
+              type: number
+              format: double
+              description: 50th percentile latency
+            p95_latency_ms:
+              type: number
+              format: double
+              description: 95th percentile latency
+            p99_latency_ms:
+              type: number
+              format: double
+              description: 99th percentile latency
+            avg_tokens_per_second:
+              type: number
+              format: double
+              description: Average throughput (tokens/sec)
+            peak_tokens_per_second:
+              type: number
+              format: double
+              description: Peak throughput (tokens/sec)
+        by_model:
+          type: array
+          items:
+            type: object
+            properties:
+              model_id:
+                type: string
+                format: uuid
+              model_name:
+                type: string
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              cost_usd:
+                type: number
+                format: double
+              avg_latency_ms:
+                type: number
+                format: double
+        by_api_key:
+          type: array
+          items:
+            type: object
+            properties:
+              api_key_id:
+                type: string
+                format: uuid
+              api_key_name:
+                type: string
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              cost_usd:
+                type: number
+                format: double
+        by_time:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              avg_latency_ms:
+                type: number
+                format: double
+              cost_usd:
+                type: number
+                format: double
+
+    PerformanceMetricsResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        throughput:
+          type: object
+          properties:
+            avg_tokens_per_second:
+              type: number
+              format: double
+              description: Average tokens processed per second
+            peak_tokens_per_second:
+              type: number
+              format: double
+              description: Peak tokens per second observed
+            avg_requests_per_second:
+              type: number
+              format: double
+              description: Average requests per second
+        latency:
+          type: object
+          properties:
+            avg_latency_ms:
+              type: number
+              format: double
+            p50_latency_ms:
+              type: number
+              format: double
+            p95_latency_ms:
+              type: number
+              format: double
+            p99_latency_ms:
+              type: number
+              format: double
+        success_metrics:
+          type: object
+          properties:
+            total_requests:
+              type: integer
+            successful_requests:
+              type: integer
+            failed_requests:
+              type: integer
+            success_rate:
+              type: number
+              format: double
+              description: Success rate as percentage
+            timeout_rate:
+              type: number
+              format: double
+              description: Timeout rate as percentage
+            retry_rate:
+              type: number
+              format: double
+              description: Retry rate as percentage
+        cache_metrics:
+          type: object
+          properties:
+            total_tokens:
+              type: integer
+            cached_tokens:
+              type: integer
+            cache_hit_rate:
+              type: number
+              format: double
+              description: Cache hit rate as percentage
+            cache_savings_usd:
+              type: number
+              format: double
+              description: Cost savings from caching
+        token_efficiency:
+          type: object
+          properties:
+            avg_prompt_length:
+              type: number
+              format: double
+            avg_completion_length:
+              type: number
+              format: double
+            prompt_completion_ratio:
+              type: number
+              format: double
+              description: Ratio of prompt to completion tokens
+
+    ThroughputMetricsResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        total_requests:
+          type: integer
+          description: Total requests in period
+        total_tokens:
+          type: integer
+          description: Total tokens processed
+        peak_rps:
+          type: number
+          format: double
+          description: Peak requests per second
+        avg_rps:
+          type: number
+          format: double
+          description: Average requests per second
+        avg_tokens_per_request:
+          type: number
+          format: double
+          description: Average tokens per request
+        cached_vs_uncached:
+          type: object
+          properties:
+            cached_requests:
+              type: integer
+            uncached_requests:
+              type: integer
+            cache_hit_rate:
+              type: number
+              format: double
+        time_series:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              rps:
+                type: number
+                format: double
+
+    ModelMetricsResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        models:
+          type: array
+          items:
+            type: object
+            properties:
+              model_id:
+                type: string
+                format: uuid
+              model_name:
+                type: string
+              tokens_processed:
+                type: integer
+              requests:
+                type: integer
+              avg_latency_ms:
+                type: number
+                format: double
+              p95_latency_ms:
+                type: number
+                format: double
+              total_cost_usd:
+                type: number
+                format: double
+              cost_per_1k_tokens:
+                type: number
+                format: double
+              usage_percentage:
+                type: number
+                format: double
+                description: Percentage of total usage
+              success_rate:
+                type: number
+                format: double
 
     # =========================================================================
     # Common Schemas
