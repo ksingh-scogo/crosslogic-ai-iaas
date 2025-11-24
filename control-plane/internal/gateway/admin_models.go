@@ -438,20 +438,20 @@ func simulateLaunchProgress(jobID string, logger *zap.Logger) {
 		{"starting_vllm", 10 * time.Second, 90},
 		{"registering", 5 * time.Second, 100},
 	}
-	
+
 	for i, stage := range stages {
 		time.Sleep(stage.duration)
-		
+
 		jobsMutex.Lock()
 		job, exists := launchJobs[jobID]
 		if !exists {
 			jobsMutex.Unlock()
 			return
 		}
-		
+
 		job.Progress = stage.progress
 		job.Stage = stage.name
-		
+
 		// Update stages display
 		stageNames := []string{
 			"Validating configuration",
@@ -462,7 +462,7 @@ func simulateLaunchProgress(jobID string, logger *zap.Logger) {
 			"Starting vLLM",
 			"Registering node",
 		}
-		
+
 		updatedStages := make([]string, len(stageNames))
 		for j, name := range stageNames {
 			if j < i {
@@ -474,19 +474,19 @@ func simulateLaunchProgress(jobID string, logger *zap.Logger) {
 			}
 		}
 		job.Stages = updatedStages
-		
+
 		if stage.progress >= 100 {
 			job.Status = "completed"
 			job.Stage = "ready"
-			logger.Info("simulated launch completed", 
+			logger.Info("simulated launch completed",
 				zap.String("job_id", jobID),
 				zap.String("model", job.ModelName),
 			)
 		}
-		
+
 		jobsMutex.Unlock()
 	}
-	
+
 	// Clean up job after 5 minutes
 	time.AfterFunc(5*time.Minute, func() {
 		jobsMutex.Lock()
@@ -494,6 +494,165 @@ func simulateLaunchProgress(jobID string, logger *zap.Logger) {
 		jobsMutex.Unlock()
 		logger.Debug("cleaned up launch job", zap.String("job_id", jobID))
 	})
+}
+
+// ListRegionsHandler lists all available regions for a cloud provider
+func (g *Gateway) ListRegionsHandler(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	if provider == "" {
+		http.Error(w, "provider parameter required", http.StatusBadRequest)
+		return
+	}
+
+	g.logger.Info("listing regions", zap.String("provider", provider))
+
+	// Using existing schema: id (uuid), code, name, city, country, provider
+	query := `
+		SELECT id, code, name, city, country
+		FROM regions
+		WHERE provider = $1 AND status = 'active'
+		ORDER BY name
+	`
+
+	rows, err := g.db.Pool.Query(r.Context(), query, provider)
+	if err != nil {
+		g.logger.Error("failed to query regions", zap.Error(err))
+		http.Error(w, "Failed to list regions", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type Region struct {
+		ID          string  `json:"id"`
+		Provider    string  `json:"provider"`
+		RegionCode  string  `json:"region_code"`
+		RegionName  string  `json:"region_name"`
+		Location    string  `json:"location"`
+		IsAvailable bool    `json:"is_available"`
+	}
+
+	regions := []Region{}
+	for rows.Next() {
+		var id, code, name string
+		var city, country *string
+		if err := rows.Scan(&id, &code, &name, &city, &country); err != nil {
+			g.logger.Error("failed to scan region", zap.Error(err))
+			continue
+		}
+
+		location := ""
+		if city != nil && *city != "" {
+			location = *city
+		}
+		if country != nil && *country != "" {
+			if location != "" {
+				location += ", " + *country
+			} else {
+				location = *country
+			}
+		}
+
+		regions = append(regions, Region{
+			ID:          id,
+			Provider:    provider,
+			RegionCode:  code,
+			RegionName:  name,
+			Location:    location,
+			IsAvailable: true,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(regions)
+}
+
+// ListInstanceTypesHandler lists all available instance types for a provider and region
+func (g *Gateway) ListInstanceTypesHandler(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	regionCode := r.URL.Query().Get("region")
+
+	if provider == "" {
+		http.Error(w, "provider parameter required", http.StatusBadRequest)
+		return
+	}
+
+	g.logger.Info("listing instance types",
+		zap.String("provider", provider),
+		zap.String("region", regionCode),
+	)
+
+	var query string
+	var rows interface{ Next() bool; Scan(dest ...interface{}) error; Close() }
+	var err error
+
+	if regionCode != "" {
+		// Get instances available in specific region (using region_code for join)
+		query = `
+			SELECT DISTINCT i.id, i.provider, i.instance_type, i.instance_name,
+			       i.vcpu_count, i.memory_gb, i.gpu_count, i.gpu_memory_gb,
+			       i.gpu_model, i.gpu_compute_capability, i.price_per_hour,
+			       i.spot_price_per_hour, i.is_available, i.supports_spot
+			FROM instance_types i
+			JOIN region_instance_availability ria ON ria.instance_type_id = i.id
+			WHERE i.provider = $1 AND ria.region_code = $2 AND i.is_available = true AND ria.is_available = true
+			ORDER BY i.gpu_model, i.gpu_count, i.vcpu_count
+		`
+		rows, err = g.db.Pool.Query(r.Context(), query, provider, regionCode)
+	} else {
+		// Get all instances for provider
+		query = `
+			SELECT id, provider, instance_type, instance_name,
+			       vcpu_count, memory_gb, gpu_count, gpu_memory_gb,
+			       gpu_model, gpu_compute_capability, price_per_hour,
+			       spot_price_per_hour, is_available, supports_spot
+			FROM instance_types
+			WHERE provider = $1 AND is_available = true
+			ORDER BY gpu_model, gpu_count, vcpu_count
+		`
+		rows, err = g.db.Pool.Query(r.Context(), query, provider)
+	}
+
+	if err != nil {
+		g.logger.Error("failed to query instance types", zap.Error(err))
+		http.Error(w, "Failed to list instance types", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type InstanceType struct {
+		ID                    int     `json:"id"`
+		Provider              string  `json:"provider"`
+		InstanceType          string  `json:"instance_type"`
+		InstanceName          *string `json:"instance_name"`
+		VCPUCount             int     `json:"vcpu_count"`
+		MemoryGB              float64 `json:"memory_gb"`
+		GPUCount              int     `json:"gpu_count"`
+		GPUMemoryGB           float64 `json:"gpu_memory_gb"`
+		GPUModel              string  `json:"gpu_model"`
+		GPUComputeCapability  *string `json:"gpu_compute_capability"`
+		PricePerHour          *float64 `json:"price_per_hour"`
+		SpotPricePerHour      *float64 `json:"spot_price_per_hour"`
+		IsAvailable           bool    `json:"is_available"`
+		SupportsSpot          bool    `json:"supports_spot"`
+	}
+
+	instanceTypes := []InstanceType{}
+	for rows.Next() {
+		var it InstanceType
+		if err := rows.Scan(
+			&it.ID, &it.Provider, &it.InstanceType, &it.InstanceName,
+			&it.VCPUCount, &it.MemoryGB, &it.GPUCount, &it.GPUMemoryGB,
+			&it.GPUModel, &it.GPUComputeCapability, &it.PricePerHour,
+			&it.SpotPricePerHour, &it.IsAvailable, &it.SupportsSpot,
+		); err != nil {
+			g.logger.Error("failed to scan instance type", zap.Error(err))
+			continue
+		}
+		instanceTypes = append(instanceTypes, it)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(instanceTypes)
 }
 
 

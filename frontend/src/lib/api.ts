@@ -12,6 +12,8 @@ import type {
   LaunchStatusResponse,
   ResolveTenantResponse,
   Model,
+  Region,
+  InstanceType,
 } from '@/types'
 
 // Create axios instance with base configuration
@@ -165,6 +167,33 @@ export const resolveTenant = async (
     name,
   })
   return data
+}
+
+// Regions
+export const fetchRegions = async (provider: string): Promise<Region[]> => {
+  try {
+    const { data } = await api.get<Region[]>(`/admin/regions?provider=${provider}`)
+    return data
+  } catch (error) {
+    console.error('Failed to fetch regions:', error)
+    throw error
+  }
+}
+
+// Instance Types
+export const fetchInstanceTypes = async (
+  provider: string,
+  regionCode: string
+): Promise<InstanceType[]> => {
+  try {
+    const { data } = await api.get<InstanceType[]>(
+      `/admin/instance-types?provider=${provider}&region=${regionCode}`
+    )
+    return data
+  } catch (error) {
+    console.error('Failed to fetch instance types:', error)
+    throw error
+  }
 }
 
 export default api

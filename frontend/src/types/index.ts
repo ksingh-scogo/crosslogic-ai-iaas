@@ -118,6 +118,32 @@ export interface InstanceSpec {
   cost_per_hour?: number
 }
 
+export interface Region {
+  id: number
+  provider: string
+  region_code: string
+  region_name: string
+  location: string
+  is_available: boolean
+}
+
+export interface InstanceType {
+  id: number
+  provider: string
+  instance_type: string
+  instance_name: string
+  vcpu_count: number
+  memory_gb: number
+  gpu_count: number
+  gpu_memory_gb: number
+  gpu_model: string
+  gpu_compute_capability?: string
+  price_per_hour?: number
+  spot_price_per_hour?: number
+  is_available: boolean
+  supports_spot: boolean
+}
+
 // Auth Types
 export interface User {
   id: string

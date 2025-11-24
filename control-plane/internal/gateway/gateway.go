@@ -142,6 +142,10 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/instances/launch", g.LaunchModelInstanceHandler)
 		r.Get("/admin/instances/status", g.GetLaunchStatusHandler)
 
+		// Regions and instance types (for dropdowns)
+		r.Get("/admin/regions", g.ListRegionsHandler)
+		r.Get("/admin/instance-types", g.ListInstanceTypesHandler)
+
 		// Tenant management
 		r.Post("/admin/tenants", g.handleCreateTenant)
 		r.Post("/admin/tenants/resolve", g.handleResolveTenant)
