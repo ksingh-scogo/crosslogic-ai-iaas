@@ -3,12 +3,25 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/models"
 	"go.uber.org/zap"
 )
+
+// RateLimitInfo contains rate limit information for response headers
+type RateLimitInfo struct {
+	// Limit is the maximum number of requests allowed per window
+	Limit int64
+	// Remaining is the number of requests remaining in the current window
+	Remaining int64
+	// ResetAt is the Unix timestamp when the window resets
+	ResetAt int64
+	// RetryAfter is the number of seconds to wait before retrying (only set when limited)
+	RetryAfter int64
+}
 
 // RateLimiter handles rate limiting
 type RateLimiter struct {
@@ -216,4 +229,81 @@ func (rl *RateLimiter) DecrementConcurrency(ctx context.Context, keyID string) e
 	concurrencyKey := fmt.Sprintf("ratelimit:key:%s:concurrency", keyID)
 	_, err := rl.cache.IncrBy(ctx, concurrencyKey, -1)
 	return err
+}
+
+// CheckRateLimitWithInfo checks rate limit and returns info for headers
+func (rl *RateLimiter) CheckRateLimitWithInfo(ctx context.Context, key *models.APIKey) (bool, *RateLimitInfo, error) {
+	now := time.Now()
+
+	// Calculate window reset time (next minute)
+	resetAt := now.Truncate(time.Minute).Add(time.Minute).Unix()
+
+	// Get current count and limit for the key
+	minuteKey := fmt.Sprintf("ratelimit:key:%s:minute:%s", key.ID.String(), now.Format("2006-01-02T15:04"))
+
+	// Get current count before increment
+	currentCountStr, _ := rl.cache.Get(ctx, minuteKey)
+	var currentCount int64 = 0
+	if currentCountStr != "" {
+		currentCount, _ = strconv.ParseInt(currentCountStr, 10, 64)
+	}
+
+	limit := int64(key.RateLimitRequestsPerMin)
+	if limit == 0 {
+		limit = 60 // Default: 60 requests per minute
+	}
+
+	info := &RateLimitInfo{
+		Limit:   limit,
+		ResetAt: resetAt,
+	}
+
+	// Check all layers of rate limits
+	allowed, err := rl.CheckRateLimit(ctx, key)
+	if err != nil {
+		return false, nil, err
+	}
+
+	if !allowed {
+		info.Remaining = 0
+		info.RetryAfter = resetAt - now.Unix()
+		if info.RetryAfter < 1 {
+			info.RetryAfter = 1
+		}
+		return false, info, nil
+	}
+
+	// After successful check, calculate remaining
+	// Note: CheckRateLimit increments, so we need to get the new count
+	newCountStr, _ := rl.cache.Get(ctx, minuteKey)
+	var newCount int64 = currentCount + 1
+	if newCountStr != "" {
+		newCount, _ = strconv.ParseInt(newCountStr, 10, 64)
+	}
+
+	info.Remaining = limit - newCount
+	if info.Remaining < 0 {
+		info.Remaining = 0
+	}
+
+	return true, info, nil
+}
+
+// GetRateLimitHeaders returns HTTP headers for rate limit information
+func (info *RateLimitInfo) GetRateLimitHeaders() map[string]string {
+	if info == nil {
+		return nil
+	}
+
+	headers := map[string]string{
+		"X-RateLimit-Limit":     strconv.FormatInt(info.Limit, 10),
+		"X-RateLimit-Remaining": strconv.FormatInt(info.Remaining, 10),
+		"X-RateLimit-Reset":     strconv.FormatInt(info.ResetAt, 10),
+	}
+
+	if info.RetryAfter > 0 {
+		headers["Retry-After"] = strconv.FormatInt(info.RetryAfter, 10)
+	}
+
+	return headers
 }
