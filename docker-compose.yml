@@ -1,8 +1,14 @@
 # Optimized Docker Compose for Local Development
-# - Removed separate SkyPilot Postgres (not needed for local dev)
-# - Made architecture auto-detected (works on both ARM and x86)
-# - Made monitoring services optional with profiles
-# - Reduced resource usage for local dev
+#
+# Optimizations:
+# - Single PostgreSQL instance (SkyPilot uses its built-in SQLite for state by default)
+# - Auto-detected architecture (works on both ARM64/M1 and x86)
+# - Monitoring services optional (use: docker compose --profile monitoring up)
+# - Reduced resource usage for local development
+#
+# Note: SkyPilot stores state in ~/.sky/ using SQLite. A separate PostgreSQL
+# for SkyPilot is only needed for advanced production configurations.
+# See database/README.md for optional PostgreSQL SkyPilot backend setup.
 
 services:
   # PostgreSQL Database (single instance)
