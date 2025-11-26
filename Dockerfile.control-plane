@@ -1,5 +1,10 @@
-# Build stage
-FROM golang:1.23-alpine AS builder
+# Build stage - Multi-architecture support
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+
+# Build arguments for cross-compilation
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
 
 # Install build dependencies (cached layer)
 RUN apk add --no-cache git make
@@ -13,14 +18,9 @@ RUN go mod download
 # Copy source code
 COPY control-plane/ ./
 
-# Build optimized binary
-# Create temp directories and use them for build cache to avoid disk space issues
-# Build for the target platform (defaults to arm64 for Apple Silicon, can be overridden)
-# Build to /tmp first to avoid conflict with control-plane directory, then move to /app
-ARG TARGETARCH=arm64
-ARG TARGETOS=linux
+# Build optimized binary with automatic architecture detection
 RUN mkdir -p /tmp/go-cache /tmp/go-tmp && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     GOCACHE=/tmp/go-cache \
     GOTMPDIR=/tmp/go-tmp \
     go build -installsuffix cgo \
