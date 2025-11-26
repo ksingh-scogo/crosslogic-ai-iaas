@@ -98,6 +98,15 @@ tags:
     description: |
       Platform-wide health checks, metrics, and configuration. View overall system status
       and available cloud resources.
+  - name: Admin - Cloud Credentials
+    description: |
+      Manage encrypted cloud provider credentials for multi-tenant deployments.
+      Credentials are stored encrypted using AES-256-GCM and are used by SkyPilot
+      API Server to provision GPU instances across AWS, Azure, GCP, and other providers.
+  - name: Admin - Node Logs
+    description: |
+      Stream real-time node launch logs for debugging and monitoring. Supports
+      Server-Sent Events (SSE) for live log streaming with progress updates.
 
   # Tenant Tags
   - name: Tenant - API Keys
@@ -116,6 +125,20 @@ tags:
     description: |
       View usage metrics, costs, and performance data. Track token usage, request counts,
       latency, and spending by model or API key.
+  - name: Tenant - Cloud Credentials (PRO)
+    description: |
+      **PRO and ENTERPRISE tiers only.**
+
+      Self-service cloud credential management allows PRO+ tenants to bring their own
+      cloud provider accounts. Store encrypted credentials for AWS, Azure, GCP, and other
+      providers to launch dedicated vLLM instances.
+  - name: Tenant - Instances (PRO)
+    description: |
+      **PRO and ENTERPRISE tiers only.**
+
+      Self-service vLLM instance management. Launch, monitor, and terminate dedicated
+      GPU instances using your own cloud credentials. Includes real-time log streaming
+      for monitoring launch progress.
 
   # Public Tags
   - name: Public
@@ -1941,6 +1964,505 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DetailedUsageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Cloud Credentials
+  # ---------------------------------------------------------------------------
+
+  /admin/credentials:
+    post:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Create cloud credential
+      description: |
+        **Platform Admin Only**
+
+        Creates a new encrypted cloud credential for a tenant. Credentials are encrypted
+        using AES-256-GCM and stored securely in the database. Supported providers:
+        AWS, Azure, GCP, Lambda Labs, RunPod, OCI, and Nebius.
+      operationId: createCredential
+      security:
+        - adminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialRequest'
+            examples:
+              aws:
+                summary: AWS Credentials
+                value:
+                  tenant_id: "550e8400-e29b-41d4-a716-446655440000"
+                  provider: "aws"
+                  name: "Production AWS"
+                  is_default: true
+                  credentials:
+                    access_key_id: "AKIAIOSFODNN7EXAMPLE"
+                    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                    region: "us-west-2"
+              azure:
+                summary: Azure Credentials
+                value:
+                  tenant_id: "550e8400-e29b-41d4-a716-446655440000"
+                  provider: "azure"
+                  name: "Production Azure"
+                  is_default: false
+                  credentials:
+                    subscription_id: "12345678-1234-1234-1234-123456789012"
+                    tenant_id: "87654321-4321-4321-4321-210987654321"
+                    client_id: "11111111-2222-3333-4444-555555555555"
+                    client_secret: "your_client_secret"
+              gcp:
+                summary: GCP Credentials
+                value:
+                  tenant_id: "550e8400-e29b-41d4-a716-446655440000"
+                  provider: "gcp"
+                  name: "Production GCP"
+                  is_default: false
+                  credentials:
+                    type: "service_account"
+                    project_id: "my-gcp-project"
+                    private_key_id: "key123"
+                    private_key: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+                    client_email: "service-account@my-gcp-project.iam.gserviceaccount.com"
+      responses:
+        '201':
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags:
+        - Admin - Cloud Credentials
+      summary: List credentials for a tenant
+      description: |
+        **Platform Admin Only**
+
+        Lists all cloud credentials for a specific tenant. Returns sanitized output
+        without decrypted secrets.
+      operationId: listCredentials
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID to list credentials for
+          schema:
+            type: string
+            format: uuid
+        - name: environment_id
+          in: query
+          required: false
+          description: Optional environment ID to filter credentials
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListCredentialsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/credentials/{id}:
+    get:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Get credential details
+      description: |
+        **Platform Admin Only**
+
+        Retrieves details of a specific credential. Returns sanitized output
+        without decrypted secrets.
+      operationId: getCredential
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Credential ID
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID that owns the credential
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Credential details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Update credential
+      description: |
+        **Platform Admin Only**
+
+        Updates the encrypted credentials data. The credential must exist and
+        belong to the specified tenant.
+      operationId: updateCredential
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Credential ID
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID that owns the credential
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCredentialRequest'
+      responses:
+        '200':
+          description: Credential updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "updated"
+                  message:
+                    type: string
+                    example: "credential updated successfully"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Delete credential
+      description: |
+        **Platform Admin Only**
+
+        Soft deletes a credential. The credential is marked as deleted but
+        retained for audit purposes.
+      operationId: deleteCredential
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Credential ID
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID that owns the credential
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Credential deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "deleted"
+                  message:
+                    type: string
+                    example: "credential deleted successfully"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/credentials/{id}/validate:
+    post:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Validate credential
+      description: |
+        **Platform Admin Only**
+
+        Validates a credential by attempting to use it with the cloud provider.
+        Updates the validation status and last validated timestamp.
+      operationId: validateCredential
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Credential ID
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID that owns the credential
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateCredentialResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/credentials/{id}/default:
+    post:
+      tags:
+        - Admin - Cloud Credentials
+      summary: Set credential as default
+      description: |
+        **Platform Admin Only**
+
+        Sets a credential as the default for its tenant and provider combination.
+        Only one credential can be the default for each tenant/provider pair.
+      operationId: setDefaultCredential
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Credential ID
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: true
+          description: Tenant ID that owns the credential
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Default set successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  message:
+                    type: string
+                    example: "credential set as default"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Admin - Node Logs
+  # ---------------------------------------------------------------------------
+
+  /admin/nodes/{id}/logs/stream:
+    get:
+      tags:
+        - Admin - Node Logs
+      summary: Stream node launch logs in real-time (SSE)
+      description: |
+        **Platform Admin Only**
+
+        Streams node launch logs in real-time via Server-Sent Events (SSE).
+        Use this endpoint to monitor GPU instance provisioning progress,
+        vLLM installation, and model loading.
+
+        **Event Types:**
+        - `log` - Individual log entry with timestamp, level, message
+        - `status` - Phase update with progress percentage
+        - `error` - Error occurred during launch
+        - `done` - Node is ready or failed
+
+        **Log Phases:**
+        - `queued` - Request received
+        - `provisioning` - SkyPilot provisioning cloud resources
+        - `instance_ready` - Cloud instance is running
+        - `installing` - Installing dependencies/vLLM
+        - `model_loading` - Loading model weights
+        - `health_check` - Running health checks
+        - `active` - Node is ready
+        - `failed` - Launch failed
+      operationId: streamNodeLogs
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Node ID
+          schema:
+            type: string
+            format: uuid
+        - name: follow
+          in: query
+          description: Keep connection open and stream new logs
+          schema:
+            type: boolean
+            default: true
+        - name: tail
+          in: query
+          description: Number of recent lines to send initially
+          schema:
+            type: integer
+            default: 100
+        - name: since
+          in: query
+          description: Only return logs after this timestamp (RFC3339)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: SSE stream of log events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                log_event:
+                  value: |
+                    event: log
+                    data: {"timestamp": "2024-01-15T10:30:00Z", "level": "info", "message": "Launching cluster...", "phase": "provisioning", "progress": 10}
+                status_event:
+                  value: |
+                    event: status
+                    data: {"phase": "installing", "progress": 45, "message": "Installing vLLM..."}
+                done_event:
+                  value: |
+                    event: done
+                    data: {"status": "active", "endpoint": "http://10.0.0.1:8000", "message": "Node ready"}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/nodes/{id}/logs:
+    get:
+      tags:
+        - Admin - Node Logs
+      summary: Get historical node logs (JSON)
+      description: |
+        **Platform Admin Only**
+
+        Retrieves historical node logs in JSON format. Use this for
+        non-streaming log retrieval or debugging past launches.
+      operationId: getNodeLogs
+      security:
+        - adminKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Node ID
+          schema:
+            type: string
+            format: uuid
+        - name: tail
+          in: query
+          description: Number of recent lines to return
+          schema:
+            type: integer
+            default: 100
+        - name: since
+          in: query
+          description: Only return logs after this timestamp (RFC3339)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Node logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeLogsResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -3884,6 +4406,388 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  # ===========================================================================
+  # TENANT PRO+ FEATURES - Self-Service Cloud & Instance Management
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Cloud Credentials (PRO/ENTERPRISE only)
+  # ---------------------------------------------------------------------------
+
+  /v1/credentials:
+    post:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Create cloud credential
+      description: |
+        **PRO and ENTERPRISE tiers only**
+
+        Create a new encrypted cloud credential for your organization.
+        Supports AWS, Azure, GCP, Lambda Labs, RunPod, OCI, and Nebius.
+      operationId: createTenantCredential
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreateCredentialRequest'
+      responses:
+        '201':
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: List your cloud credentials
+      description: |
+        **PRO and ENTERPRISE tiers only**
+
+        List all cloud credentials for your organization.
+      operationId: listTenantCredentials
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: List of credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListCredentialsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/credentials/{id}:
+    get:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Get credential details
+      operationId: getTenantCredential
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Credential details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialOutput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Update credential
+      operationId: updateTenantCredential
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCredentialRequest'
+      responses:
+        '200':
+          description: Credential updated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Delete credential
+      operationId: deleteTenantCredential
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Credential deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/credentials/{id}/validate:
+    post:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Validate credential
+      operationId: validateTenantCredential
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateCredentialResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/credentials/{id}/default:
+    post:
+      tags:
+        - Tenant - Cloud Credentials (PRO)
+      summary: Set credential as default
+      operationId: setTenantDefaultCredential
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Default set successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # Tenant - Instances (PRO/ENTERPRISE only)
+  # ---------------------------------------------------------------------------
+
+  /v1/instances:
+    post:
+      tags:
+        - Tenant - Instances (PRO)
+      summary: Launch vLLM instance
+      description: |
+        **PRO and ENTERPRISE tiers only**
+
+        Launch a dedicated vLLM GPU instance using your cloud credentials.
+        The instance will be billed to your cloud account directly.
+      operationId: launchTenantInstance
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LaunchInstanceRequest'
+            example:
+              model: "meta-llama/Llama-3.1-8B-Instruct"
+              provider: "aws"
+              region: "us-west-2"
+              gpu: "A10G"
+              gpu_count: 1
+              idle_minutes_to_autostop: 30
+      responses:
+        '201':
+          description: Instance launch initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags:
+        - Tenant - Instances (PRO)
+      summary: List your vLLM instances
+      description: |
+        **PRO and ENTERPRISE tiers only**
+
+        List all vLLM instances launched with your cloud credentials.
+      operationId: listTenantInstances
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [launching, active, stopped, terminated, failed]
+      responses:
+        '200':
+          description: List of instances
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListInstancesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+
+  /v1/instances/{id}:
+    get:
+      tags:
+        - Tenant - Instances (PRO)
+      summary: Get instance details
+      operationId: getTenantInstance
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Instance details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceOutput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - Tenant - Instances (PRO)
+      summary: Terminate instance
+      operationId: terminateTenantInstance
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Termination initiated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/instances/{id}/logs/stream:
+    get:
+      tags:
+        - Tenant - Instances (PRO)
+      summary: Stream instance logs (SSE)
+      description: |
+        **PRO and ENTERPRISE tiers only**
+
+        Stream real-time logs for your instance launch via Server-Sent Events.
+        Monitor provisioning, installation, and model loading progress.
+      operationId: streamTenantInstanceLogs
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: follow
+          in: query
+          schema:
+            type: boolean
+            default: true
+        - name: tail
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: SSE stream of log events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - PRO or ENTERPRISE tier required
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     adminKeyAuth:
@@ -3903,6 +4807,262 @@ components:
         All /v1/* endpoints require this Bearer token.
 
   schemas:
+    # =========================================================================
+    # Cloud Credential Schemas
+    # =========================================================================
+
+    CreateCredentialRequest:
+      type: object
+      required:
+        - tenant_id
+        - provider
+        - name
+        - credentials
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          description: ID of the tenant that owns this credential
+        environment_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Optional environment ID for environment-specific credentials
+        provider:
+          type: string
+          enum: [aws, azure, gcp, lambda, runpod, oci, nebius]
+          description: Cloud provider type
+        name:
+          type: string
+          description: Human-readable name for this credential
+          example: "Production AWS Credentials"
+        credentials:
+          type: object
+          description: Provider-specific credential data (will be encrypted)
+        is_default:
+          type: boolean
+          default: false
+          description: Whether this is the default credential for the tenant/provider
+
+    UpdateCredentialRequest:
+      type: object
+      required:
+        - credentials
+      properties:
+        credentials:
+          type: object
+          description: Updated provider-specific credential data (will be encrypted)
+
+    CredentialOutput:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        environment_id:
+          type: string
+          format: uuid
+          nullable: true
+        provider:
+          type: string
+          enum: [aws, azure, gcp, lambda, runpod, oci, nebius]
+        name:
+          type: string
+        is_default:
+          type: boolean
+        is_valid:
+          type: boolean
+          nullable: true
+        last_validated_at:
+          type: string
+          format: date-time
+          nullable: true
+        validation_error:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ListCredentialsResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialOutput'
+
+    ValidateCredentialResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        validation_error:
+          type: string
+          nullable: true
+
+    TenantCreateCredentialRequest:
+      type: object
+      required:
+        - provider
+        - name
+        - credentials
+      properties:
+        provider:
+          type: string
+          enum: [aws, azure, gcp, lambda, runpod, oci, nebius]
+          description: Cloud provider type
+        name:
+          type: string
+          description: Human-readable name for this credential
+          example: "My AWS Production"
+        credentials:
+          type: object
+          description: Provider-specific credential data (will be encrypted)
+        is_default:
+          type: boolean
+          default: false
+          description: Whether this is the default credential for this provider
+
+    # =========================================================================
+    # Node Log Schemas
+    # =========================================================================
+
+    NodeLogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        message:
+          type: string
+        phase:
+          type: string
+          enum: [queued, provisioning, instance_ready, installing, model_loading, health_check, active, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    NodeLogsResponse:
+      type: object
+      properties:
+        node_id:
+          type: string
+          format: uuid
+        cluster_name:
+          type: string
+        status:
+          type: string
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeLogEntry'
+        total_count:
+          type: integer
+
+    # =========================================================================
+    # Instance Schemas (PRO tier)
+    # =========================================================================
+
+    LaunchInstanceRequest:
+      type: object
+      required:
+        - model
+        - region
+        - gpu
+      properties:
+        model:
+          type: string
+          description: Model to deploy (HuggingFace model ID)
+          example: "meta-llama/Llama-3.1-8B-Instruct"
+        provider:
+          type: string
+          enum: [aws, azure, gcp, lambda, runpod, oci, nebius]
+          description: Cloud provider (uses default credential if not specified)
+        region:
+          type: string
+          description: Cloud region
+          example: "us-west-2"
+        gpu:
+          type: string
+          description: GPU type
+          example: "A10G"
+        gpu_count:
+          type: integer
+          default: 1
+          description: Number of GPUs
+        idle_minutes_to_autostop:
+          type: integer
+          default: 30
+          description: Minutes of idle time before auto-termination
+        credential_id:
+          type: string
+          format: uuid
+          description: Specific credential ID (uses default if not specified)
+        use_spot:
+          type: boolean
+          default: true
+          description: Use spot/preemptible instances for cost savings
+        disk_size:
+          type: integer
+          default: 256
+          description: Disk size in GB
+        vllm_args:
+          type: string
+          description: Additional vLLM arguments
+
+    InstanceOutput:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        cluster_name:
+          type: string
+        model:
+          type: string
+        provider:
+          type: string
+        region:
+          type: string
+        gpu:
+          type: string
+        status:
+          type: string
+          enum: [launching, active, stopped, terminated, failed]
+        endpoint_url:
+          type: string
+        spot_instance:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        terminated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ListInstancesResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InstanceOutput'
+
     # =========================================================================
     # Model Schemas
     # =========================================================================

@@ -11,6 +11,7 @@ import (
 
 	"github.com/crosslogic/control-plane/internal/billing"
 	"github.com/crosslogic/control-plane/internal/config"
+	"github.com/crosslogic/control-plane/internal/credentials"
 	"github.com/crosslogic/control-plane/internal/gateway"
 	"github.com/crosslogic/control-plane/internal/notifications"
 	"github.com/crosslogic/control-plane/internal/orchestrator"
@@ -90,15 +91,17 @@ func main() {
 		logger.Info("billing disabled; webhook handler not registered")
 	}
 
-	// Initialize SkyPilot orchestrator with event bus
+	// Initialize SkyPilot orchestrator with event bus and API server config
 	orch, err := orchestrator.NewSkyPilotOrchestrator(
 		db,
+		redisCache,
 		logger,
 		cfg.Server.ControlPlaneURL,
 		cfg.Runtime.VLLMVersion,
 		cfg.Runtime.TorchVersion,
 		eventBus,
 		cfg.R2,
+		cfg.SkyPilot,
 	)
 	if err != nil {
 		logger.Fatal("failed to initialize orchestrator", zap.Error(err))
@@ -113,12 +116,29 @@ func main() {
 	reconciler := orchestrator.NewStateReconciler(db, logger, orch, monitor)
 	logger.Info("initialized state reconciler")
 
+	// Initialize credential service for cloud credential management
+	var credentialService *credentials.Service
+	if cfg.SkyPilot.UseAPIServer {
+		if cfg.SkyPilot.CredentialEncryptionKey == "" {
+			logger.Fatal("SKYPILOT_CREDENTIAL_ENCRYPTION_KEY is required when using API Server mode")
+		}
+		// Use a consistent key ID for encryption (in production, this should be versioned for key rotation)
+		encryptionKeyID := "v1"
+		credentialService, err = credentials.NewService(db, cfg.SkyPilot.CredentialEncryptionKey, encryptionKeyID, logger)
+		if err != nil {
+			logger.Fatal("failed to initialize credential service", zap.Error(err))
+		}
+		logger.Info("initialized credential service for cloud credential management")
+	} else {
+		logger.Info("credential service disabled (using CLI mode)")
+	}
+
 	// Start background services context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize API gateway with event bus
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus)
+	// Initialize API gateway with event bus and credential service
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, cfg.Security.AdminAPIToken, eventBus, credentialService)
 	gw.StartHealthMetrics(ctx)
 
 	// Start queue depth monitoring for intelligent load balancing
