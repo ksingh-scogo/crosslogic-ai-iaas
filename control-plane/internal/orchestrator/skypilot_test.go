@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/crosslogic/control-plane/internal/config"
+	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
@@ -24,9 +25,10 @@ const (
 func TestNewSkyPilotOrchestrator(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
+	mockCache := &cache.Cache{}
 	controlPlaneURL := "https://api.crosslogic.ai"
 
-	orch, err := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, err := NewSkyPilotOrchestrator(db, mockCache, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	if err != nil {
 		t.Fatalf("NewSkyPilotOrchestrator failed: %v", err)
@@ -57,7 +59,7 @@ func TestNewSkyPilotOrchestrator(t *testing.T) {
 func TestValidateNodeConfig(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	tests := []struct {
 		name        string
@@ -155,13 +157,14 @@ func TestGenerateTaskYAML(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
 	controlPlaneURL := "https://api.test.com"
-	orch, _ := NewSkyPilotOrchestrator(db, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, controlPlaneURL, testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
 		Provider: "aws",
 		Region:   "us-west-2",
 		GPU:      "A100",
+		GPUCount: 1,
 		Model:    "meta-llama/Llama-2-7b-chat-hf",
 		UseSpot:  true,
 		DiskSize: 256,
@@ -199,13 +202,14 @@ func TestGenerateTaskYAML(t *testing.T) {
 func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
 		Provider: "gcp",
 		Region:   "us-central1",
 		GPU:      "V100",
+		GPUCount: 1,
 		Model:    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 		UseSpot:  false, // On-demand
 		DiskSize: 128,
@@ -232,13 +236,14 @@ func TestGenerateTaskYAML_OnDemand(t *testing.T) {
 func TestLaunchNode_YAMLFileCreation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
 		Provider: "aws",
 		Region:   "us-west-2",
 		GPU:      "A10G",
+		GPUCount: 1,
 		Model:    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 		UseSpot:  true,
 		DiskSize: 100,
@@ -339,7 +344,7 @@ func TestNodeConfig_JSONSerialization(t *testing.T) {
 func TestMultiCloudConfigurations(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	providers := []string{"aws", "gcp", "azure", "lambda", "oci"}
 
@@ -375,7 +380,7 @@ func TestMultiCloudConfigurations(t *testing.T) {
 func TestGPUTypes(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	gpuTypes := []string{"A100", "V100", "A10G", "T4", "H100", "L4"}
 
@@ -386,6 +391,7 @@ func TestGPUTypes(t *testing.T) {
 				Provider: "aws",
 				Region:   "us-west-2",
 				GPU:      gpu,
+				GPUCount: 1,
 				Model:    "test-model",
 			}
 
@@ -406,7 +412,7 @@ func TestGPUTypes(t *testing.T) {
 func TestVLLMArgsIncorporation(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	customArgs := []string{
 		"--tensor-parallel-size 2",
@@ -422,6 +428,7 @@ func TestVLLMArgsIncorporation(t *testing.T) {
 				Provider: "aws",
 				Region:   "us-west-2",
 				GPU:      "A100",
+				GPUCount: 1,
 				Model:    "test-model",
 				VLLMArgs: args,
 			}
@@ -442,13 +449,14 @@ func TestVLLMArgsIncorporation(t *testing.T) {
 func TestTaskYAMLStructure(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
 		Provider: "aws",
 		Region:   "us-west-2",
 		GPU:      "A100",
+		GPUCount: 1,
 		Model:    "test-model",
 	}
 
@@ -495,13 +503,14 @@ func TestTaskYAMLStructure(t *testing.T) {
 func BenchmarkGenerateTaskYAML(b *testing.B) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	config := NodeConfig{
 		NodeID:   uuid.New().String(),
 		Provider: "aws",
 		Region:   "us-west-2",
 		GPU:      "A100",
+		GPUCount: 1,
 		Model:    "meta-llama/Llama-2-7b-chat-hf",
 		UseSpot:  true,
 		DiskSize: 256,
@@ -509,7 +518,7 @@ func BenchmarkGenerateTaskYAML(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := orch.generateTaskYAML(config)
+		_, err := orch.generateTaskYAML(config, "cic-test-cluster")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -520,7 +529,7 @@ func BenchmarkGenerateTaskYAML(b *testing.B) {
 func TestConcurrentYAMLGeneration(t *testing.T) {
 	logger := zap.NewNop()
 	db := &database.Database{Pool: &pgxpool.Pool{}}
-	orch, _ := NewSkyPilotOrchestrator(db, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.JuiceFSConfig{})
+	orch, _ := NewSkyPilotOrchestrator(db, &cache.Cache{}, logger, "https://api.test.com", testVLLMVersion, testTorchVersion, events.NewBus(logger), config.R2Config{}, config.SkyPilotConfig{})
 
 	done := make(chan bool, 10)
 	errors := make(chan error, 10)
@@ -532,6 +541,7 @@ func TestConcurrentYAMLGeneration(t *testing.T) {
 				Provider: "aws",
 				Region:   "us-west-2",
 				GPU:      "A100",
+				GPUCount: 1,
 				Model:    "test-model",
 			}
 

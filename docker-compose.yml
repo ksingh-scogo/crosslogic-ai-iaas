@@ -50,6 +50,67 @@ services:
     networks:
       - crosslogic-network
 
+  # SkyPilot API Server
+  skypilot-api:
+    image: berkeleyskypilot/skypilot-nightly:latest
+    container_name: crosslogic-skypilot-api
+    command: ["sky", "api", "start", "--host", "0.0.0.0", "--foreground"]
+    ports:
+      - "46580:46580"
+    environment:
+      # SkyPilot API Server configuration
+      - SKYPILOT_API_PORT=46580
+      - SKYPILOT_API_HOST=0.0.0.0
+
+      # Database configuration (optional - uses SQLite by default)
+      - SKYPILOT_DB_TYPE=${SKYPILOT_DB_TYPE:-sqlite}
+      - SKYPILOT_DB_HOST=postgres
+      - SKYPILOT_DB_PORT=5432
+      - SKYPILOT_DB_USER=crosslogic
+      - SKYPILOT_DB_PASSWORD=${DB_PASSWORD:-changeme}
+      - SKYPILOT_DB_NAME=skypilot_state
+
+      # Cloud credentials (passed through from host environment)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+
+      # API Server security
+      - SKYPILOT_SERVICE_ACCOUNT_TOKEN=${SKYPILOT_SERVICE_ACCOUNT_TOKEN:-sky_dev_skypilot_token_12345}
+      - SKYPILOT_CREDENTIAL_ENCRYPTION_KEY=${SKYPILOT_CREDENTIAL_ENCRYPTION_KEY:-dev_encryption_key_minimum_32_chars}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      # SkyPilot state directory (stores cluster configs, logs, etc.)
+      - skypilot_state:/root/.sky
+
+      # Cloud credentials directory (optional - for file-based credentials)
+      # Uncomment these if you want to mount cloud credentials from host:
+      # - ${HOME}/.aws:/root/.aws:ro
+      # - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+      # - ${HOME}/.azure:/root/.azure:ro
+
+      # SSH keys for cluster access
+      - skypilot_ssh:/root/.ssh
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:46580/api/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crosslogic-network
+    restart: unless-stopped
+
   # Control Plane - Architecture auto-detected via Docker buildx
   control-plane:
     build:
@@ -112,11 +173,19 @@ services:
       - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
       - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+
+      # SkyPilot API Server integration
+      - SKYPILOT_API_SERVER_URL=http://skypilot-api:46580
+      - SKYPILOT_USE_API_SERVER=true
+      - SKYPILOT_SERVICE_ACCOUNT_TOKEN=${SKYPILOT_SERVICE_ACCOUNT_TOKEN:-sky_dev_skypilot_token_12345}
+      - SKYPILOT_CREDENTIAL_ENCRYPTION_KEY=${SKYPILOT_CREDENTIAL_ENCRYPTION_KEY:-dev_encryption_key_minimum_32_chars}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      skypilot-api:
+        condition: service_started
     networks:
       - crosslogic-network
     restart: unless-stopped
@@ -175,6 +244,8 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  skypilot_state:
+  skypilot_ssh:
   prometheus_data:
   grafana_data:
 

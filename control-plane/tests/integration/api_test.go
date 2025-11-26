@@ -51,10 +51,10 @@ func TestEndToEndAPI(t *testing.T) {
 
 	// Setup components
 	webhookHandler := billing.NewWebhookHandler("whsec_test", db, redisCache, logger, eventBus)
-	orch, _ := orchestrator.NewSkyPilotOrchestrator(db, logger, "http://localhost:8080", "0.6.2", "2.4.0", eventBus, config.JuiceFSConfig{})
+	orch, _ := orchestrator.NewSkyPilotOrchestrator(db, redisCache, logger, "http://localhost:8080", "0.6.2", "2.4.0", eventBus, config.R2Config{}, config.SkyPilotConfig{})
 
-	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch)
-	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, "admin-token", eventBus)
+	monitor := orchestrator.NewTripleSafetyMonitor(db, logger, orch, eventBus)
+	gw := gateway.NewGateway(db, redisCache, logger, webhookHandler, orch, monitor, "admin-token", eventBus, nil)
 
 	// Create test server
 	ts := httptest.NewServer(gw)

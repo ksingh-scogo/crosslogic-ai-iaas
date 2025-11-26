@@ -6,6 +6,9 @@ import (
 
 // Serve Swagger UI HTML page
 func (g *Gateway) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
+	// Set relaxed CSP for Swagger UI (allows scripts/styles from unpkg.com)
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://unpkg.com; font-src 'self' https://unpkg.com; frame-ancestors 'none'")
+
 	html := `<!DOCTYPE html>
 <html lang="en">
 <head>
