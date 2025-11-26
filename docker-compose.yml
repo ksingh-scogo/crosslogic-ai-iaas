@@ -1,5 +1,17 @@
+# Optimized Docker Compose for Local Development
+#
+# Optimizations:
+# - Single PostgreSQL instance (SkyPilot uses its built-in SQLite for state by default)
+# - Auto-detected architecture (works on both ARM64/M1 and x86)
+# - Monitoring services optional (use: docker compose --profile monitoring up)
+# - Reduced resource usage for local development
+#
+# Note: SkyPilot stores state in ~/.sky/ using SQLite. A separate PostgreSQL
+# for SkyPilot is only needed for advanced production configurations.
+# See database/README.md for optional PostgreSQL SkyPilot backend setup.
+
 services:
-  # PostgreSQL Database
+  # PostgreSQL Database (single instance)
   postgres:
     image: postgres:16-alpine
     container_name: crosslogic-postgres
@@ -13,59 +25,36 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./database/schemas:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crosslogic"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD-SHELL", "pg_isready -U crosslogic -d crosslogic_iaas"]
+      interval: 5s
+      timeout: 3s
       retries: 5
+      start_period: 5s
     networks:
       - crosslogic-network
 
-  # SkyPilot State Database (separate for SkyPilot state management)
-  postgres-skypilot:
-    image: postgres:16-alpine
-    container_name: crosslogic-skypilot-db
-    environment:
-      POSTGRES_DB: skypilot_state
-      POSTGRES_USER: crosslogic
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_skypilot_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crosslogic"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - crosslogic-network
-
-  # Redis Cache (for rate limiting)
+  # Redis Cache
   redis:
     image: redis:7-alpine
     container_name: crosslogic-redis
-    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 5
     networks:
       - crosslogic-network
 
-  # Control Plane
+  # Control Plane - Architecture auto-detected via Docker buildx
   control-plane:
-    platform: linux/arm64
     build:
       context: .
       dockerfile: Dockerfile.control-plane
-      args:
-        TARGETARCH: arm64
-        TARGETOS: linux
     container_name: crosslogic-control-plane
     ports:
       - "8080:8080"
@@ -83,20 +72,22 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-changeme}
       - DB_NAME=crosslogic_iaas
       - DB_SSL_MODE=disable
+      - DB_MAX_CONNECTIONS=25
+      - DB_MIN_CONNECTIONS=5
 
       # Redis
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
 
-      # Cloudflare R2 (for fast model loading - vLLM native S3 support)
-      - R2_ENDPOINT=${R2_ENDPOINT}
+      # Cloudflare R2 (optional for local dev)
+      - R2_ENDPOINT=${R2_ENDPOINT:-}
       - R2_BUCKET=${R2_BUCKET:-crosslogic-models}
-      - R2_ACCESS_KEY=${R2_ACCESS_KEY}
-      - R2_SECRET_KEY=${R2_SECRET_KEY}
-      - R2_CDN_DOMAIN=${R2_CDN_DOMAIN}
+      - R2_ACCESS_KEY=${R2_ACCESS_KEY:-}
+      - R2_SECRET_KEY=${R2_SECRET_KEY:-}
+      - R2_CDN_DOMAIN=${R2_CDN_DOMAIN:-}
 
-      # Stripe (use test keys or set via .env)
+      # Stripe (optional for local dev)
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-whsec_dummy}
 
@@ -109,41 +100,23 @@ services:
       - TORCH_VERSION=2.4.0
 
       # Monitoring
-      - LOG_LEVEL=debug
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - MONITORING_ENABLED=true
       - PROMETHEUS_PORT=9090
 
-      # Notifications (disabled for local dev - set NOTIFICATIONS_ENABLED=true and configure channels to enable)
+      # Notifications (disabled for local dev)
       - NOTIFICATIONS_ENABLED=false
-      
-      # Azure credentials for SkyPilot (for real GPU instance launches)
-      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}
-      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
-      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
-      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+
+      # Cloud credentials (optional - for real GPU launches)
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
-      postgres-skypilot:
-        condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - crosslogic-network
-    restart: unless-stopped
-
-  # Prometheus (optional - for monitoring)
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: crosslogic-prometheus
-    ports:
-      - "9091:9090"
-    volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
     networks:
       - crosslogic-network
     restart: unless-stopped
@@ -155,33 +128,44 @@ services:
       dockerfile: Dockerfile.dashboard
       args:
         - VITE_API_BASE_URL=http://localhost:8080
-        - VITE_ADMIN_TOKEN=${ADMIN_API_TOKEN}
+        - VITE_ADMIN_TOKEN=${ADMIN_API_TOKEN:-dev_admin_token}
     container_name: crosslogic-dashboard
     ports:
       - "3000:80"
-    environment:
-      - VITE_API_BASE_URL=http://control-plane:8080
-      - VITE_ADMIN_TOKEN=${ADMIN_API_TOKEN}
     depends_on:
       - control-plane
     networks:
       - crosslogic-network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
 
-  # Grafana (optional - for visualization)
+  # ===== MONITORING SERVICES (use: docker compose --profile monitoring up) =====
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: crosslogic-prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+    networks:
+      - crosslogic-network
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     container_name: crosslogic-grafana
+    profiles: ["monitoring"]
     ports:
-      - "3001:3000"  # Changed to 3001 to avoid conflict with dashboard
+      - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana
     networks:
@@ -190,7 +174,6 @@ services:
 
 volumes:
   postgres_data:
-  postgres_skypilot_data:
   redis_data:
   prometheus_data:
   grafana_data:

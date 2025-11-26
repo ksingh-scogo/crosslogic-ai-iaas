@@ -116,7 +116,11 @@ Adjust based on your workload:
 - High traffic: Increase max open connections to 50-100
 - Low traffic: Decrease to 10-15 to reduce resource usage
 
-## PostgreSQL State Backend for SkyPilot
+## PostgreSQL State Backend for SkyPilot (Advanced - Optional)
+
+> **Note:** This is an **optional advanced configuration** for production deployments.
+> For local development, SkyPilot uses its default SQLite backend (`~/.sky/`) which works fine.
+> The control plane uses `sky` CLI commands and does not require a separate SkyPilot database.
 
 To enable SkyPilot to use PostgreSQL for state management instead of local SQLite:
 
@@ -195,12 +199,14 @@ export JUICEFS_REDIS_URL=redis://localhost:6379/1
 ### Backup
 
 ```bash
-# Backup all databases
+# Backup main database
 pg_dump -U crosslogic crosslogic_iaas > backup_$(date +%Y%m%d).sql
-pg_dump -U crosslogic skypilot_state > skypilot_backup_$(date +%Y%m%d).sql
 
 # Backup with compression
 pg_dump -U crosslogic crosslogic_iaas | gzip > backup_$(date +%Y%m%d).sql.gz
+
+# If using optional PostgreSQL SkyPilot backend (advanced):
+# pg_dump -U crosslogic skypilot_state > skypilot_backup_$(date +%Y%m%d).sql
 ```
 
 ### Restore
