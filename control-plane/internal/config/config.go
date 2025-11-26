@@ -17,6 +17,7 @@ type Config struct {
 	Runtime    RuntimeConfig
 	Monitoring MonitoringConfig
 	R2         R2Config
+	SkyPilot   SkyPilotConfig
 }
 
 // ServerConfig holds server configuration
@@ -93,6 +94,26 @@ type R2Config struct {
 	CDNDomain string // Optional: Custom CDN domain for cache
 }
 
+// SkyPilotConfig holds SkyPilot configuration
+type SkyPilotConfig struct {
+	// API Server Configuration
+	APIServerURL        string        // SkyPilot API Server URL
+	ServiceAccountToken string        // Service account token for API Server authentication
+	UseAPIServer        bool          // Whether to use API Server mode (true) or CLI mode (false)
+
+	// Timeouts
+	LaunchTimeout       time.Duration // Timeout for cluster launch operations
+	TerminateTimeout    time.Duration // Timeout for cluster termination operations
+	StatusTimeout       time.Duration // Timeout for status check operations
+
+	// Retry configuration
+	MaxRetries          int           // Maximum number of retries for failed operations
+	RetryBackoff        time.Duration // Backoff duration between retries
+
+	// Credential encryption key (for cloud credentials in DB)
+	CredentialEncryptionKey string    // Encryption key for storing cloud credentials securely
+}
+
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
@@ -154,6 +175,17 @@ func LoadConfig() (*Config, error) {
 			SecretKey: getEnv("R2_SECRET_KEY", ""),
 			CDNDomain: getEnv("R2_CDN_DOMAIN", ""),
 		},
+		SkyPilot: SkyPilotConfig{
+			APIServerURL:            getEnv("SKYPILOT_API_SERVER_URL", ""),
+			ServiceAccountToken:     getEnv("SKYPILOT_SERVICE_ACCOUNT_TOKEN", ""),
+			UseAPIServer:            getEnvAsBool("SKYPILOT_USE_API_SERVER", false),
+			LaunchTimeout:           getEnvAsDuration("SKYPILOT_LAUNCH_TIMEOUT", "10m"),
+			TerminateTimeout:        getEnvAsDuration("SKYPILOT_TERMINATE_TIMEOUT", "5m"),
+			StatusTimeout:           getEnvAsDuration("SKYPILOT_STATUS_TIMEOUT", "30s"),
+			MaxRetries:              getEnvAsInt("SKYPILOT_MAX_RETRIES", 3),
+			RetryBackoff:            getEnvAsDuration("SKYPILOT_RETRY_BACKOFF", "5s"),
+			CredentialEncryptionKey: getEnv("SKYPILOT_CREDENTIAL_ENCRYPTION_KEY", ""),
+		},
 	}
 
 	// Validate required fields
@@ -167,6 +199,19 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Security.AdminAPIToken == "" {
 		return nil, fmt.Errorf("ADMIN_API_TOKEN is required")
+	}
+
+	// Validate SkyPilot API Server configuration when enabled
+	if cfg.SkyPilot.UseAPIServer {
+		if cfg.SkyPilot.APIServerURL == "" {
+			return nil, fmt.Errorf("SKYPILOT_API_SERVER_URL is required when SKYPILOT_USE_API_SERVER is true")
+		}
+		if cfg.SkyPilot.ServiceAccountToken == "" {
+			return nil, fmt.Errorf("SKYPILOT_SERVICE_ACCOUNT_TOKEN is required when SKYPILOT_USE_API_SERVER is true")
+		}
+		if cfg.SkyPilot.CredentialEncryptionKey == "" {
+			return nil, fmt.Errorf("SKYPILOT_CREDENTIAL_ENCRYPTION_KEY is required when SKYPILOT_USE_API_SERVER is true")
+		}
 	}
 
 	return cfg, nil

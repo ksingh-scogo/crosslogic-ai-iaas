@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"github.com/crosslogic/control-plane/internal/config"
+	"github.com/crosslogic/control-plane/internal/skypilot"
+	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
 	"github.com/crosslogic/control-plane/pkg/events"
 	"github.com/google/uuid"
@@ -26,9 +30,13 @@ import (
 // GPU availability, and managed execution.
 //
 // Architecture:
-// - Launch: Generate SkyPilot task YAML → Execute `sky launch` → Register node
-// - Monitor: Track node status via `sky status` → Update database
-// - Terminate: Execute `sky down` → Remove from registry
+// - Launch: Generate SkyPilot task YAML → Execute `sky launch` or API call → Register node
+// - Monitor: Track node status via `sky status` or API → Update database
+// - Terminate: Execute `sky down` or API call → Remove from registry
+//
+// Operating Modes:
+// - CLI Mode (useAPIServer=false): Direct CLI commands (legacy, requires local sky CLI)
+// - API Mode (useAPIServer=true): HTTP API calls (recommended, scalable, multi-tenant)
 //
 // Features:
 // - Multi-cloud support (AWS, GCP, Azure, Lambda, OCI)
@@ -36,15 +44,18 @@ import (
 // - vLLM pre-installation and configuration
 // - Node agent auto-start with health checks
 // - Graceful shutdown with job draining
+// - Multi-tenant cloud credential management
 //
 // Production Considerations:
-// - Requires SkyPilot CLI installed and configured with cloud credentials
+// - API Mode: Requires SkyPilot API Server running and configured
+// - CLI Mode: Requires SkyPilot CLI installed and configured with cloud credentials
 // - Launch latency: 2-5 minutes for cold start, 30s-1min for warm start
 // - Cost optimization: Use spot instances with failover to on-demand
 // - Monitoring: Track launch success rate, time-to-ready, and cost per node
 //
 // Security:
-// - Cloud credentials managed via SkyPilot configuration
+// - API Mode: Cloud credentials encrypted in database, passed per-request
+// - CLI Mode: Cloud credentials managed via SkyPilot configuration
 // - Node agent uses secure HTTPS communication with control plane
 // - API keys and secrets passed via environment variables
 type SkyPilotOrchestrator struct {
@@ -64,12 +75,23 @@ type SkyPilotOrchestrator struct {
 	controlPlaneURL string
 
 	// runtime versions for dependency pinning
-	// runtime versions for dependency pinning
 	vllmVersion  string
 	torchVersion string
 
 	// r2Config holds Cloudflare R2 configuration
 	r2Config config.R2Config
+
+	// API client for SkyPilot API Server mode
+	apiClient *skypilot.Client
+
+	// useAPIServer determines whether to use API Server (true) or CLI (false)
+	useAPIServer bool
+
+	// credentialEncryptionKey for decrypting cloud credentials from database
+	credentialEncryptionKey []byte
+
+	// logStore for storing node launch logs in Redis
+	logStore *NodeLogStore
 }
 
 // NodeConfig defines the configuration for launching a new GPU node.
@@ -113,6 +135,9 @@ type NodeConfig struct {
 
 	// DeploymentID links this node to a deployment (optional)
 	DeploymentID string `json:"deployment_id,omitempty"`
+
+	// TenantID identifies which tenant owns this node (required for API mode)
+	TenantID string `json:"tenant_id,omitempty"`
 
 	// Run:ai Model Streamer configuration (for ultra-fast model loading)
 	// StreamerConcurrency is the number of concurrent threads for parallel streaming (8-64)
@@ -198,10 +223,10 @@ setup: |
   export AWS_SECRET_ACCESS_KEY="{{.R2SecretKey}}"
   export AWS_ENDPOINT_URL="{{.R2Endpoint}}"
   export HF_HUB_ENABLE_HF_TRANSFER=1
-  
+
   # Create HuggingFace cache directory
   mkdir -p ~/.cache/huggingface
-  
+
   if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_ENDPOINT_URL" ]; then
     echo "✓ R2 credentials configured"
     echo "  Endpoint: $AWS_ENDPOINT_URL"
@@ -245,13 +270,13 @@ run: |
   echo "=== Starting vLLM Server ==="
   # Set up model path - vLLM will handle S3:// URLs natively
   MODEL_NAME="{{.Model}}"
-  
+
   # Check if model is in R2
   if [ -n "$AWS_ENDPOINT_URL" ] && [ -n "{{.R2Bucket}}" ]; then
     # Use S3 URL for model stored in R2
     # vLLM natively supports s3:// URLs via HuggingFace Hub
     R2_MODEL_PATH="s3://{{.R2Bucket}}/$MODEL_NAME"
-    
+
     echo "✓ Checking if model exists in R2..."
     # Quick check (optional - vLLM will fail gracefully if not found)
     if aws s3 ls "$R2_MODEL_PATH/" --endpoint-url "$AWS_ENDPOINT_URL" &> /dev/null; then
@@ -339,10 +364,15 @@ run: |
 // - db: Database connection for node registry management
 // - logger: Structured logger for observability
 // - controlPlaneURL: HTTPS endpoint for node agent registration (e.g., "https://api.crosslogic.ai")
+// - vllmVersion: vLLM version to install
+// - torchVersion: PyTorch version to install
+// - eventBus: Event bus for publishing node lifecycle events
+// - r2Config: Cloudflare R2 configuration for model storage
+// - skyPilotConfig: SkyPilot configuration (API server URL, credentials, timeouts)
 //
 // Returns:
 // - *SkyPilotOrchestrator: Configured orchestrator ready to launch nodes
-// - error: Template parsing error (should never occur with valid template)
+// - error: Configuration error, template parsing error, or API client initialization error
 //
 // Example:
 //
@@ -350,16 +380,28 @@ run: |
 //	    database,
 //	    logger,
 //	    "https://api.crosslogic.ai",
-//	    "https://api.crosslogic.ai",
+//	    "0.6.2",
+//	    "2.4.0",
+//	    eventBus,
+//	    r2Config,
+//	    skyPilotConfig,
 //	)
-func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlPlaneURL, vllmVersion, torchVersion string, eventBus *events.Bus, r2Config config.R2Config) (*SkyPilotOrchestrator, error) {
+func NewSkyPilotOrchestrator(
+	db *database.Database,
+	cache *cache.Cache,
+	logger *zap.Logger,
+	controlPlaneURL, vllmVersion, torchVersion string,
+	eventBus *events.Bus,
+	r2Config config.R2Config,
+	skyPilotConfig config.SkyPilotConfig,
+) (*SkyPilotOrchestrator, error) {
 	// Parse template
 	tmpl, err := template.New("skypilot").Parse(SkyPilotTaskTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SkyPilot task template: %w", err)
 	}
 
-	return &SkyPilotOrchestrator{
+	orchestrator := &SkyPilotOrchestrator{
 		taskTemplate:    tmpl,
 		db:              db,
 		logger:          logger,
@@ -368,7 +410,46 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 		vllmVersion:     vllmVersion,
 		torchVersion:    torchVersion,
 		r2Config:        r2Config,
-	}, nil
+		useAPIServer:    skyPilotConfig.UseAPIServer,
+		logStore:        NewNodeLogStore(cache, logger),
+	}
+
+	// Initialize API client if API Server mode is enabled
+	if skyPilotConfig.UseAPIServer {
+		if skyPilotConfig.APIServerURL == "" {
+			return nil, fmt.Errorf("SkyPilot API Server URL is required when UseAPIServer is true")
+		}
+		if skyPilotConfig.ServiceAccountToken == "" {
+			return nil, fmt.Errorf("SkyPilot service account token is required when UseAPIServer is true")
+		}
+		if skyPilotConfig.CredentialEncryptionKey == "" {
+			return nil, fmt.Errorf("credential encryption key is required when UseAPIServer is true")
+		}
+
+		// Store encryption key for credential decryption
+		orchestrator.credentialEncryptionKey = []byte(skyPilotConfig.CredentialEncryptionKey)
+
+		// Initialize API client
+		clientConfig := skypilot.Config{
+			BaseURL:       skyPilotConfig.APIServerURL,
+			Token:         skyPilotConfig.ServiceAccountToken,
+			Timeout:       skyPilotConfig.LaunchTimeout,
+			MaxRetries:    skyPilotConfig.MaxRetries,
+			RetryDelay:    skyPilotConfig.RetryBackoff,
+			RetryMaxDelay: skyPilotConfig.RetryBackoff * 4, // Max 4x initial backoff
+		}
+
+		orchestrator.apiClient = skypilot.NewClient(clientConfig, logger)
+
+		logger.Info("SkyPilot orchestrator initialized in API Server mode",
+			zap.String("api_server_url", skyPilotConfig.APIServerURL),
+			zap.Duration("launch_timeout", skyPilotConfig.LaunchTimeout),
+		)
+	} else {
+		logger.Info("SkyPilot orchestrator initialized in CLI mode")
+	}
+
+	return orchestrator, nil
 }
 
 // LaunchNode provisions a new GPU node using SkyPilot.
@@ -376,10 +457,20 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 // Process:
 // 1. Validate configuration and set defaults
 // 2. Generate SkyPilot task YAML from template
-// 3. Write task file to temporary location
-// 4. Execute `sky launch` command
-// 5. Register node in database
-// 6. Return cluster name for tracking
+// 3. Route to API or CLI based on useAPIServer flag
+// 4. Register node in database
+// 5. Return cluster name for tracking
+//
+// API Mode:
+// - Retrieves tenant cloud credentials from database
+// - Decrypts credentials using encryption key
+// - Sends launch request to SkyPilot API Server with credentials
+// - Polls async request status until completion
+//
+// CLI Mode:
+// - Writes task file to temporary location
+// - Executes `sky launch` command
+// - Returns immediately (detached mode)
 //
 // Launch Time:
 // - Cold start (new region/GPU): 3-5 minutes
@@ -392,21 +483,29 @@ func NewSkyPilotOrchestrator(db *database.Database, logger *zap.Logger, controlP
 //
 // Error Handling:
 // - Invalid config: Returns validation error immediately
-// - SkyPilot failure: Returns error with command output for debugging
+// - SkyPilot failure: Returns error with output/details for debugging
 // - Cloud API errors: Propagated from SkyPilot (check cloud credentials)
 //
 // Returns:
 // - string: Cluster name (format: "cic-{provider}-{region}-{gpu}-{spot|od}-{id}")
-// - error: Validation error, template error, or SkyPilot launch failure
+// - error: Validation error, credential error, template error, or SkyPilot launch failure
 func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig) (string, error) {
 	startTime := time.Now()
 
 	// Validate and set defaults
 	if err := o.validateNodeConfig(&config); err != nil {
+		o.logStore.LogError(ctx, config.NodeID, PhaseQueued, "Invalid configuration", err.Error())
 		return "", fmt.Errorf("invalid node configuration: %w", err)
 	}
 
 	clusterName := GenerateClusterName(config)
+
+	// Log initial queued status
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseQueued,
+		fmt.Sprintf("Node launch request queued: %s", clusterName), 0)
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseQueued,
+		fmt.Sprintf("Provider: %s, Region: %s, GPU: %s:%d, Model: %s",
+			config.Provider, config.Region, config.GPU, config.GPUCount, config.Model), 5)
 
 	o.logger.Info("launching GPU node with SkyPilot",
 		zap.String("node_id", config.NodeID),
@@ -417,50 +516,25 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 		zap.Int("gpu_count", config.GPUCount),
 		zap.String("model", config.Model),
 		zap.Bool("use_spot", config.UseSpot),
+		zap.Bool("use_api_server", o.useAPIServer),
 	)
 
-	// Generate task YAML
-	taskYAML, err := o.generateTaskYAML(config, clusterName)
+	// Log provisioning phase
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		"Starting cloud resource provisioning...", 10)
+
+	// Route to API or CLI based on configuration
+	var err error
+	if o.useAPIServer {
+		err = o.launchNodeViaAPI(ctx, config, clusterName)
+	} else {
+		err = o.launchNodeViaCLI(ctx, config, clusterName)
+	}
+
 	if err != nil {
-		return "", fmt.Errorf("failed to generate task YAML: %w", err)
-	}
-
-	// Write task file
-	taskFile := fmt.Sprintf("/tmp/sky-task-%s.yaml", config.NodeID)
-	if err := os.WriteFile(taskFile, []byte(taskYAML), 0644); err != nil {
-		return "", fmt.Errorf("failed to write task file: %w", err)
-	}
-	defer os.Remove(taskFile)
-
-	o.logger.Debug("generated SkyPilot task file",
-		zap.String("task_file", taskFile),
-		zap.Int("yaml_size", len(taskYAML)),
-	)
-
-	// Launch with SkyPilot
-	// Note: Do NOT use --down flag as it terminates the cluster after job completion
-	// We want the vLLM server to keep running for inference requests
-	cmd := exec.CommandContext(ctx, "sky", "launch",
-		"-c", clusterName, // Cluster name
-		taskFile,          // Task file
-		"-y",              // Auto-confirm
-		"--detach-run",    // Detach after launch (returns immediately)
-	)
-
-	// Capture output for debugging
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Execute launch
-	if err := cmd.Run(); err != nil {
-		o.logger.Error("SkyPilot launch failed",
-			zap.Error(err),
-			zap.String("stdout", stdout.String()),
-			zap.String("stderr", stderr.String()),
-		)
-		return "", fmt.Errorf("sky launch failed: %w\nStdout: %s\nStderr: %s",
-			err, stdout.String(), stderr.String())
+		o.logStore.LogError(ctx, config.NodeID, PhaseFailed,
+			"Node launch failed", err.Error())
+		return "", err
 	}
 
 	launchDuration := time.Since(startTime)
@@ -475,18 +549,18 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 	if o.eventBus != nil {
 		evt := events.NewEvent(
 			events.EventNodeLaunched,
-			"", // No tenant ID for system events
+			config.TenantID,
 			map[string]interface{}{
 				"node_id":         config.NodeID,
 				"cluster_name":    clusterName,
 				"provider":        config.Provider,
 				"region":          config.Region,
-				"instance_type":   "unknown", // Not in config anymore, maybe infer?
 				"gpu_type":        config.GPU,
 				"gpu_count":       config.GPUCount,
 				"spot_instance":   config.UseSpot,
 				"model":           config.Model,
 				"launch_duration": launchDuration.String(),
+				"api_mode":        o.useAPIServer,
 			},
 		)
 		if err := o.eventBus.Publish(ctx, evt); err != nil {
@@ -509,12 +583,170 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 	return clusterName, nil
 }
 
+// launchNodeViaAPI launches a node using the SkyPilot API Server.
+func (o *SkyPilotOrchestrator) launchNodeViaAPI(ctx context.Context, config NodeConfig, clusterName string) error {
+	// Get tenant cloud credentials from database
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		"Retrieving cloud credentials...", 15)
+
+	cloudCreds, err := o.getTenantCredentials(ctx, config.TenantID, config.Provider)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant credentials: %w", err)
+	}
+
+	// Generate task YAML
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		"Generating SkyPilot task configuration...", 20)
+
+	taskYAML, err := o.generateTaskYAML(config, clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to generate task YAML: %w", err)
+	}
+
+	// Build launch request
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		fmt.Sprintf("Submitting launch request to SkyPilot API (cluster: %s)...", clusterName), 25)
+
+	launchReq := skypilot.LaunchRequest{
+		ClusterName:      clusterName,
+		TaskYAML:         taskYAML,
+		RetryUntilUp:     true,
+		Detach:           true,
+		CloudCredentials: cloudCreds,
+		Envs: map[string]string{
+			"NODE_ID":          config.NodeID,
+			"CONTROL_PLANE_URL": o.controlPlaneURL,
+		},
+	}
+
+	// Call API
+	launchResp, err := o.apiClient.Launch(ctx, launchReq)
+	if err != nil {
+		return fmt.Errorf("API launch failed: %w", err)
+	}
+
+	o.logger.Info("cluster launch request submitted",
+		zap.String("cluster_name", clusterName),
+		zap.String("request_id", launchResp.RequestID),
+	)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		fmt.Sprintf("Launch request accepted (ID: %s). Waiting for cloud resources...", launchResp.RequestID), 30)
+
+	// Poll for completion (async operation)
+	// Use a reasonable poll interval (5 seconds initially)
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseInstanceReady,
+		"Cloud instance is starting up...", 50)
+
+	requestStatus, err := o.apiClient.WaitForRequest(ctx, launchResp.RequestID, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("launch request failed: %w", err)
+	}
+
+	if requestStatus.Status != "completed" {
+		return fmt.Errorf("launch request ended with status: %s, error: %s",
+			requestStatus.Status, requestStatus.Error)
+	}
+
+	o.logger.Info("cluster launch completed",
+		zap.String("cluster_name", clusterName),
+		zap.String("request_id", launchResp.RequestID),
+	)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseInstalling,
+		"Instance is ready. Installing dependencies and vLLM...", 60)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseModelLoading,
+		fmt.Sprintf("Loading model %s...", config.Model), 70)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseHealthCheck,
+		"Running health checks...", 85)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseActive,
+		"Node is ready and serving requests!", 100)
+
+	return nil
+}
+
+// launchNodeViaCLI launches a node using the SkyPilot CLI (legacy mode).
+func (o *SkyPilotOrchestrator) launchNodeViaCLI(ctx context.Context, config NodeConfig, clusterName string) error {
+	// Generate task YAML
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		"Generating SkyPilot task configuration...", 15)
+
+	taskYAML, err := o.generateTaskYAML(config, clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to generate task YAML: %w", err)
+	}
+
+	// Write task file
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		"Preparing launch command...", 20)
+
+	taskFile := fmt.Sprintf("/tmp/sky-task-%s.yaml", config.NodeID)
+	if err := os.WriteFile(taskFile, []byte(taskYAML), 0644); err != nil {
+		return fmt.Errorf("failed to write task file: %w", err)
+	}
+	defer os.Remove(taskFile)
+
+	o.logger.Debug("generated SkyPilot task file",
+		zap.String("task_file", taskFile),
+		zap.Int("yaml_size", len(taskYAML)),
+	)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseProvisioning,
+		fmt.Sprintf("Launching cluster %s via SkyPilot CLI...", clusterName), 30)
+
+	// Launch with SkyPilot
+	// Note: Do NOT use --down flag as it terminates the cluster after job completion
+	// We want the vLLM server to keep running for inference requests
+	cmd := exec.CommandContext(ctx, "sky", "launch",
+		"-c", clusterName, // Cluster name
+		taskFile,          // Task file
+		"-y",              // Auto-confirm
+		"--detach-run",    // Detach after launch (returns immediately)
+	)
+
+	// Capture output for debugging
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseInstanceReady,
+		"Waiting for cloud instance to start...", 50)
+
+	// Execute launch
+	if err := cmd.Run(); err != nil {
+		o.logger.Error("SkyPilot CLI launch failed",
+			zap.Error(err),
+			zap.String("stdout", stdout.String()),
+			zap.String("stderr", stderr.String()),
+		)
+		return fmt.Errorf("sky launch failed: %w\nStdout: %s\nStderr: %s",
+			err, stdout.String(), stderr.String())
+	}
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseInstalling,
+		"Instance is ready. Installing dependencies and vLLM...", 60)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseModelLoading,
+		fmt.Sprintf("Loading model %s...", config.Model), 70)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseHealthCheck,
+		"Running health checks...", 85)
+
+	o.logStore.LogInfo(ctx, config.NodeID, PhaseActive,
+		"Node is ready and serving requests!", 100)
+
+	return nil
+}
+
 // TerminateNode terminates a GPU node and removes it from the cluster.
 //
 // Process:
-// 1. Execute `sky down` to terminate cloud resources
-// 2. Update node status in database to 'terminated'
-// 3. Clean up local SkyPilot state
+// 1. Route to API or CLI based on useAPIServer flag
+// 2. Execute termination (async in API mode, sync in CLI mode)
+// 3. Update node status in database to 'terminated'
 //
 // Behavior:
 // - Graceful shutdown: Waits for running jobs to complete (configurable timeout)
@@ -524,7 +756,7 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 //
 // Error Handling:
 // - Already terminated: Returns success (idempotent)
-// - SkyPilot failure: Returns error with command output
+// - SkyPilot failure: Returns error with command output/details
 // - Partial failure: Cloud resources may be left in inconsistent state (manual cleanup required)
 //
 // Returns:
@@ -532,8 +764,71 @@ func (o *SkyPilotOrchestrator) LaunchNode(ctx context.Context, config NodeConfig
 func (o *SkyPilotOrchestrator) TerminateNode(ctx context.Context, clusterName string) error {
 	o.logger.Info("terminating GPU node",
 		zap.String("cluster_name", clusterName),
+		zap.Bool("use_api_server", o.useAPIServer),
 	)
 
+	var err error
+	if o.useAPIServer {
+		err = o.terminateNodeViaAPI(ctx, clusterName)
+	} else {
+		err = o.terminateNodeViaCLI(ctx, clusterName)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	o.logger.Info("GPU node terminated successfully",
+		zap.String("cluster_name", clusterName),
+	)
+
+	// Update node status in database
+	if err := o.updateNodeStatus(ctx, clusterName, "terminated"); err != nil {
+		o.logger.Warn("failed to update node status in database",
+			zap.Error(err),
+			zap.String("cluster_name", clusterName),
+		)
+	}
+
+	return nil
+}
+
+// terminateNodeViaAPI terminates a node using the SkyPilot API Server.
+func (o *SkyPilotOrchestrator) terminateNodeViaAPI(ctx context.Context, clusterName string) error {
+	// Call API to terminate cluster
+	terminateResp, err := o.apiClient.Terminate(ctx, clusterName, true)
+	if err != nil {
+		// Check if cluster not found (already terminated)
+		if apiErr, ok := err.(*skypilot.APIError); ok && apiErr.IsNotFound() {
+			o.logger.Info("cluster already terminated",
+				zap.String("cluster_name", clusterName),
+			)
+			return nil
+		}
+		return fmt.Errorf("API terminate failed: %w", err)
+	}
+
+	o.logger.Info("cluster termination request submitted",
+		zap.String("cluster_name", clusterName),
+		zap.String("request_id", terminateResp.RequestID),
+	)
+
+	// Wait for termination to complete
+	requestStatus, err := o.apiClient.WaitForRequest(ctx, terminateResp.RequestID, 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("termination request failed: %w", err)
+	}
+
+	if requestStatus.Status != "completed" {
+		return fmt.Errorf("termination request ended with status: %s, error: %s",
+			requestStatus.Status, requestStatus.Error)
+	}
+
+	return nil
+}
+
+// terminateNodeViaCLI terminates a node using the SkyPilot CLI (legacy mode).
+func (o *SkyPilotOrchestrator) terminateNodeViaCLI(ctx context.Context, clusterName string) error {
 	// Execute sky down
 	cmd := exec.CommandContext(ctx, "sky", "down",
 		clusterName, // Cluster name
@@ -554,25 +849,13 @@ func (o *SkyPilotOrchestrator) TerminateNode(ctx context.Context, clusterName st
 			return nil
 		}
 
-		o.logger.Error("SkyPilot termination failed",
+		o.logger.Error("SkyPilot CLI termination failed",
 			zap.Error(err),
 			zap.String("stdout", stdout.String()),
 			zap.String("stderr", stderr.String()),
 		)
 		return fmt.Errorf("sky down failed: %w\nStdout: %s\nStderr: %s",
 			err, stdout.String(), stderr.String())
-	}
-
-	o.logger.Info("GPU node terminated successfully",
-		zap.String("cluster_name", clusterName),
-	)
-
-	// Update node status in database
-	if err := o.updateNodeStatus(ctx, clusterName, "terminated"); err != nil {
-		o.logger.Warn("failed to update node status in database",
-			zap.Error(err),
-			zap.String("cluster_name", clusterName),
-		)
 	}
 
 	return nil
@@ -586,12 +869,34 @@ func (o *SkyPilotOrchestrator) TerminateNode(ctx context.Context, clusterName st
 // - DOWN: Node is terminated
 // - STOPPED: Node is stopped but not terminated (can be restarted)
 //
-// Uses `sky status` command with JSON output for structured parsing.
+// Routes to API or CLI based on useAPIServer flag.
 //
 // Returns:
-// - string: Node status (UP, INIT, DOWN, STOPPED)
-// - error: Command execution error or JSON parsing error
+// - string: Node status (UP, INIT, DOWN, STOPPED, UNKNOWN)
+// - error: Command execution error, API error, or JSON parsing error
 func (o *SkyPilotOrchestrator) GetNodeStatus(ctx context.Context, clusterName string) (string, error) {
+	if o.useAPIServer {
+		return o.getNodeStatusViaAPI(ctx, clusterName)
+	}
+	return o.getNodeStatusViaCLI(ctx, clusterName)
+}
+
+// getNodeStatusViaAPI retrieves node status using the SkyPilot API Server.
+func (o *SkyPilotOrchestrator) getNodeStatusViaAPI(ctx context.Context, clusterName string) (string, error) {
+	status, err := o.apiClient.GetStatus(ctx, clusterName)
+	if err != nil {
+		// Check if cluster not found
+		if apiErr, ok := err.(*skypilot.APIError); ok && apiErr.IsNotFound() {
+			return "DOWN", nil
+		}
+		return "", fmt.Errorf("API get status failed: %w", err)
+	}
+
+	return status.Status, nil
+}
+
+// getNodeStatusViaCLI retrieves node status using the SkyPilot CLI (legacy mode).
+func (o *SkyPilotOrchestrator) getNodeStatusViaCLI(ctx context.Context, clusterName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sky", "status",
 		clusterName, // Cluster name
 		"--json",    // JSON output
@@ -626,15 +931,41 @@ func (o *SkyPilotOrchestrator) GetClusterStatus(clusterName string) (string, err
 	return o.GetNodeStatus(context.Background(), clusterName)
 }
 
-// ListNodes returns all active GPU nodes managed by SkyPilot.
+// GetAllClusters returns all active GPU clusters managed by SkyPilot.
 //
-// This queries the local SkyPilot database for all clusters with the
-// "cic-" prefix (CrossLogic Inference Cloud nodes).
+// This queries either the SkyPilot API Server or local SkyPilot database
+// for all clusters with the "cic-" prefix (CrossLogic Inference Cloud nodes).
 //
 // Returns:
 // - []string: List of cluster names
-// - error: Command execution error or parsing error
-func (o *SkyPilotOrchestrator) ListNodes(ctx context.Context) ([]string, error) {
+// - error: API error, command execution error, or parsing error
+func (o *SkyPilotOrchestrator) GetAllClusters(ctx context.Context) ([]string, error) {
+	if o.useAPIServer {
+		return o.getAllClustersViaAPI(ctx)
+	}
+	return o.getAllClustersViaCLI(ctx)
+}
+
+// getAllClustersViaAPI retrieves all clusters using the SkyPilot API Server.
+func (o *SkyPilotOrchestrator) getAllClustersViaAPI(ctx context.Context) ([]string, error) {
+	listResp, err := o.apiClient.ListClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("API list clusters failed: %w", err)
+	}
+
+	// Filter for CIC nodes
+	var nodeNames []string
+	for _, cluster := range listResp.Clusters {
+		if len(cluster.Name) > 4 && cluster.Name[:4] == "cic-" {
+			nodeNames = append(nodeNames, cluster.Name)
+		}
+	}
+
+	return nodeNames, nil
+}
+
+// getAllClustersViaCLI retrieves all clusters using the SkyPilot CLI (legacy mode).
+func (o *SkyPilotOrchestrator) getAllClustersViaCLI(ctx context.Context) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "sky", "status", "--json")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -660,9 +991,14 @@ func (o *SkyPilotOrchestrator) ListNodes(ctx context.Context) ([]string, error) 
 	return nodeNames, nil
 }
 
+// ListNodes is an alias for GetAllClusters for backward compatibility.
+func (o *SkyPilotOrchestrator) ListNodes(ctx context.Context) ([]string, error) {
+	return o.GetAllClusters(ctx)
+}
+
 // ExecCommand executes a command on a running node.
 //
-// Uses `sky exec` to run the command via SSH.
+// Routes to API or CLI based on useAPIServer flag.
 //
 // Returns:
 // - string: Command output (stdout + stderr)
@@ -671,8 +1007,43 @@ func (o *SkyPilotOrchestrator) ExecCommand(ctx context.Context, clusterName, com
 	o.logger.Debug("executing command on node",
 		zap.String("cluster_name", clusterName),
 		zap.String("command", command),
+		zap.Bool("use_api_server", o.useAPIServer),
 	)
 
+	if o.useAPIServer {
+		return o.execCommandViaAPI(ctx, clusterName, command)
+	}
+	return o.execCommandViaCLI(ctx, clusterName, command)
+}
+
+// execCommandViaAPI executes a command using the SkyPilot API Server.
+func (o *SkyPilotOrchestrator) execCommandViaAPI(ctx context.Context, clusterName, command string) (string, error) {
+	execReq := skypilot.ExecuteRequest{
+		ClusterName: clusterName,
+		Command:     command,
+		Timeout:     300, // 5 minutes
+	}
+
+	execResp, err := o.apiClient.Execute(ctx, execReq)
+	if err != nil {
+		return "", fmt.Errorf("API execute failed: %w", err)
+	}
+
+	// Combine stdout and stderr
+	output := execResp.Stdout
+	if execResp.Stderr != "" {
+		output += "\n" + execResp.Stderr
+	}
+
+	if execResp.ExitCode != 0 {
+		return output, fmt.Errorf("command exited with code %d", execResp.ExitCode)
+	}
+
+	return output, nil
+}
+
+// execCommandViaCLI executes a command using the SkyPilot CLI (legacy mode).
+func (o *SkyPilotOrchestrator) execCommandViaCLI(ctx context.Context, clusterName, command string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sky", "exec",
 		clusterName,
 		command,
@@ -684,6 +1055,120 @@ func (o *SkyPilotOrchestrator) ExecCommand(ctx context.Context, clusterName, com
 	}
 
 	return string(output), nil
+}
+
+// getTenantCredentials retrieves and decrypts cloud credentials for a tenant from the database.
+func (o *SkyPilotOrchestrator) getTenantCredentials(ctx context.Context, tenantID, provider string) (*skypilot.CloudCredentials, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant ID is required for API mode")
+	}
+
+	// Query database for credentials
+	query := `
+		SELECT credentials_encrypted, encryption_key_id
+		FROM cloud_credentials
+		WHERE tenant_id = $1
+		  AND provider = $2
+		  AND status = 'active'
+		  AND (is_default = true OR environment_id IS NULL)
+		ORDER BY is_default DESC
+		LIMIT 1
+	`
+
+	var encryptedCreds []byte
+	var keyID string
+
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tenant ID: %w", err)
+	}
+
+	err = o.db.Pool.QueryRow(ctx, query, tenantUUID, provider).Scan(&encryptedCreds, &keyID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query credentials: %w", err)
+	}
+
+	// Decrypt credentials
+	decryptedJSON, err := o.decryptCredentials(encryptedCreds)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt credentials: %w", err)
+	}
+
+	// Parse decrypted JSON based on provider
+	cloudCreds := &skypilot.CloudCredentials{}
+
+	switch provider {
+	case "aws":
+		var awsCreds skypilot.AWSCredentials
+		if err := json.Unmarshal(decryptedJSON, &awsCreds); err != nil {
+			return nil, fmt.Errorf("failed to parse AWS credentials: %w", err)
+		}
+		cloudCreds.AWS = &awsCreds
+
+	case "azure":
+		var azureCreds skypilot.AzureCredentials
+		if err := json.Unmarshal(decryptedJSON, &azureCreds); err != nil {
+			return nil, fmt.Errorf("failed to parse Azure credentials: %w", err)
+		}
+		cloudCreds.Azure = &azureCreds
+
+	case "gcp":
+		var gcpCreds skypilot.GCPCredentials
+		if err := json.Unmarshal(decryptedJSON, &gcpCreds); err != nil {
+			return nil, fmt.Errorf("failed to parse GCP credentials: %w", err)
+		}
+		cloudCreds.GCP = &gcpCreds
+
+	default:
+		return nil, fmt.Errorf("unsupported provider: %s", provider)
+	}
+
+	o.logger.Debug("retrieved tenant credentials",
+		zap.String("tenant_id", tenantID),
+		zap.String("provider", provider),
+		zap.String("key_id", keyID),
+	)
+
+	return cloudCreds, nil
+}
+
+// decryptCredentials decrypts encrypted credentials using AES-256-GCM.
+func (o *SkyPilotOrchestrator) decryptCredentials(encryptedData []byte) ([]byte, error) {
+	// Ensure key is 32 bytes for AES-256
+	key := o.credentialEncryptionKey
+	if len(key) != 32 {
+		// If key is not 32 bytes, hash it or pad/truncate
+		// For production, use proper key derivation (PBKDF2, Argon2)
+		if len(key) < 32 {
+			// Pad with zeros (NOT recommended for production)
+			key = append(key, make([]byte, 32-len(key))...)
+		} else {
+			key = key[:32]
+		}
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(encryptedData) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := encryptedData[:nonceSize], encryptedData[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // validateNodeConfig validates and sets defaults for node configuration.
@@ -707,6 +1192,11 @@ func (o *SkyPilotOrchestrator) validateNodeConfig(config *NodeConfig) error {
 
 	if config.Model == "" {
 		return fmt.Errorf("model is required")
+	}
+
+	// Validate tenant ID in API mode
+	if o.useAPIServer && config.TenantID == "" {
+		return fmt.Errorf("tenant ID is required when using API Server mode")
 	}
 
 	// Set defaults
@@ -790,13 +1280,13 @@ func (o *SkyPilotOrchestrator) generateTaskYAML(config NodeConfig, clusterName s
 		"VLLMArgs":         config.VLLMArgs,
 		"TensorParallel":   config.TensorParallel,
 		"ControlPlaneURL":  o.controlPlaneURL,
-		"VLLMVersion":  o.vllmVersion,
-		"TorchVersion": o.torchVersion,
-		"Timestamp":    time.Now().Format(time.RFC3339),
-		"R2Endpoint":   o.r2Config.Endpoint,
-		"R2Bucket":     o.r2Config.Bucket,
-		"R2AccessKey":  o.r2Config.AccessKey,
-		"R2SecretKey":  o.r2Config.SecretKey,
+		"VLLMVersion":      o.vllmVersion,
+		"TorchVersion":     o.torchVersion,
+		"Timestamp":        time.Now().Format(time.RFC3339),
+		"R2Endpoint":       o.r2Config.Endpoint,
+		"R2Bucket":         o.r2Config.Bucket,
+		"R2AccessKey":      o.r2Config.AccessKey,
+		"R2SecretKey":      o.r2Config.SecretKey,
 		// Run:ai Model Streamer configuration
 		"StreamerConcurrency":    config.StreamerConcurrency,
 		"StreamerMemoryLimit":    config.StreamerMemoryLimit,

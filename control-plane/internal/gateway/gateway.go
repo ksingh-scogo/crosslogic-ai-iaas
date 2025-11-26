@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/crosslogic/control-plane/internal/billing"
+	"github.com/crosslogic/control-plane/internal/credentials"
 	"github.com/crosslogic/control-plane/internal/orchestrator"
 	"github.com/crosslogic/control-plane/pkg/cache"
 	"github.com/crosslogic/control-plane/pkg/database"
@@ -28,36 +29,38 @@ const defaultEstimatedTokens = 1024
 
 // Gateway handles API requests
 type Gateway struct {
-	db             *database.Database
-	cache          *cache.Cache
-	logger         *zap.Logger
-	authenticator  *Authenticator
-	rateLimiter    *RateLimiter
-	router         *chi.Mux
-	webhookHandler *billing.WebhookHandler
-	orchestrator   *orchestrator.SkyPilotOrchestrator
-	monitor        *orchestrator.TripleSafetyMonitor
-	adminToken     string
-	eventBus       *events.Bus
+	db                *database.Database
+	cache             *cache.Cache
+	logger            *zap.Logger
+	authenticator     *Authenticator
+	rateLimiter       *RateLimiter
+	router            *chi.Mux
+	webhookHandler    *billing.WebhookHandler
+	orchestrator      *orchestrator.SkyPilotOrchestrator
+	monitor           *orchestrator.TripleSafetyMonitor
+	adminToken        string
+	eventBus          *events.Bus
+	credentialService *credentials.Service
 	// LoadBalancer handles intelligent request routing
 	LoadBalancer *IntelligentLoadBalancer
 }
 
 // NewGateway creates a new API gateway
-func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, monitor *orchestrator.TripleSafetyMonitor, adminToken string, eventBus *events.Bus) *Gateway {
+func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, webhookHandler *billing.WebhookHandler, orch *orchestrator.SkyPilotOrchestrator, monitor *orchestrator.TripleSafetyMonitor, adminToken string, eventBus *events.Bus, credentialService *credentials.Service) *Gateway {
 	g := &Gateway{
-		db:             db,
-		cache:          cache,
-		logger:         logger,
-		authenticator:  NewAuthenticator(db, cache, logger),
-		rateLimiter:    NewRateLimiter(cache, logger),
-		router:         chi.NewRouter(),
-		webhookHandler: webhookHandler,
-		orchestrator:   orch,
-		monitor:        monitor,
-		adminToken:     adminToken,
-		eventBus:       eventBus,
-		LoadBalancer:   NewIntelligentLoadBalancer(db, logger),
+		db:                db,
+		cache:             cache,
+		logger:            logger,
+		authenticator:     NewAuthenticator(db, cache, logger),
+		rateLimiter:       NewRateLimiter(cache, logger),
+		router:            chi.NewRouter(),
+		webhookHandler:    webhookHandler,
+		orchestrator:      orch,
+		monitor:           monitor,
+		adminToken:        adminToken,
+		eventBus:          eventBus,
+		credentialService: credentialService,
+		LoadBalancer:      NewIntelligentLoadBalancer(db, logger),
 	}
 
 	g.setupRoutes()
@@ -138,6 +141,10 @@ func (g *Gateway) setupRoutes() {
 		r.Post("/admin/nodes/{node_id}/drain", g.handleDrainNode)
 		r.Post("/admin/nodes/{node_id}/termination-warning", g.handleTerminationWarning)
 
+		// Admin - Node Logs (Real-time streaming)
+		r.Get("/admin/nodes/{id}/logs", g.handleGetNodeLogs)
+		r.Get("/admin/nodes/{id}/logs/stream", g.handleStreamNodeLogs)
+
 		// Admin - Deployments
 		r.Post("/admin/deployments", g.handleCreateDeployment)
 		r.Get("/admin/deployments", g.handleListDeployments)
@@ -166,6 +173,15 @@ func (g *Gateway) setupRoutes() {
 		r.Get("/admin/api-keys/{tenant_id}", g.handleListAPIKeys)
 		r.Post("/admin/api-keys", g.handleCreateAPIKey)
 		r.Delete("/admin/api-keys/{key_id}", g.handleRevokeAPIKey)
+
+		// Admin - Credentials
+		r.Post("/admin/credentials", g.handleCreateCredential)
+		r.Get("/admin/credentials", g.handleListCredentials)
+		r.Get("/admin/credentials/{id}", g.handleGetCredential)
+		r.Put("/admin/credentials/{id}", g.handleUpdateCredential)
+		r.Delete("/admin/credentials/{id}", g.handleDeleteCredential)
+		r.Post("/admin/credentials/{id}/validate", g.handleValidateCredential)
+		r.Post("/admin/credentials/{id}/default", g.handleSetDefaultCredential)
 
 		// Admin - Model/Instance management (UI-driven, legacy)
 		r.Get("/admin/models/r2", g.ListR2ModelsHandler)
@@ -208,6 +224,27 @@ func (g *Gateway) setupRoutes() {
 		// Tenant - Metrics
 		r.Get("/v1/metrics/latency", g.handleGetLatencyMetrics)
 		r.Get("/v1/metrics/tokens", g.handleGetTokenMetrics)
+
+		// === SELF-SERVICE FEATURES (PRO & ENTERPRISE ONLY) ===
+		r.Group(func(proRouter chi.Router) {
+			proRouter.Use(g.RequireProOrEnterprise)
+
+			// Tenant - Cloud Credentials (self-service)
+			proRouter.Post("/v1/credentials", g.handleCreateTenantCredential)
+			proRouter.Get("/v1/credentials", g.handleListTenantCredentials)
+			proRouter.Get("/v1/credentials/{id}", g.handleGetTenantCredential)
+			proRouter.Put("/v1/credentials/{id}", g.handleUpdateTenantCredential)
+			proRouter.Delete("/v1/credentials/{id}", g.handleDeleteTenantCredential)
+			proRouter.Post("/v1/credentials/{id}/validate", g.handleValidateTenantCredential)
+			proRouter.Post("/v1/credentials/{id}/default", g.handleSetDefaultTenantCredential)
+
+			// Tenant - vLLM Instances (self-service)
+			proRouter.Post("/v1/instances", g.handleLaunchTenantInstance)
+			proRouter.Get("/v1/instances", g.handleListTenantInstances)
+			proRouter.Get("/v1/instances/{id}", g.handleGetTenantInstance)
+			proRouter.Delete("/v1/instances/{id}", g.handleTerminateTenantInstance)
+			proRouter.Get("/v1/instances/{id}/logs/stream", g.handleStreamTenantInstanceLogs)
+		})
 
 		// === EXTENDED TENANT ROUTES ===
 		g.setupExtendedTenantRoutes(r)
@@ -1172,10 +1209,9 @@ type CompletionRequest struct {
 }
 
 type EmbeddingRequest struct {
-	Model      string   `json:"model"`
-	Input      string   `json:"input,omitempty"` // Single input string
-	InputArray []string `json:"input,omitempty"` // Array of input strings (OpenAI supports both)
-	User       string   `json:"user,omitempty"`  // Optional user identifier
+	Model string      `json:"model"`
+	Input interface{} `json:"input,omitempty"` // Can be string or []string (OpenAI supports both)
+	User  string      `json:"user,omitempty"`  // Optional user identifier
 }
 
 // Validate checks if the request is valid
@@ -1183,8 +1219,19 @@ func (r *EmbeddingRequest) Validate() error {
 	if r.Model == "" {
 		return fmt.Errorf("model is required")
 	}
-	if r.Input == "" && len(r.InputArray) == 0 {
+	if r.Input == nil {
 		return fmt.Errorf("input is required")
+	}
+	// Check for empty input (both string and []string cases)
+	switch v := r.Input.(type) {
+	case string:
+		if v == "" {
+			return fmt.Errorf("input is required")
+		}
+	case []interface{}:
+		if len(v) == 0 {
+			return fmt.Errorf("input is required")
+		}
 	}
 	return nil
 }
