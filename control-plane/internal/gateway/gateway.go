@@ -66,20 +66,29 @@ func NewGateway(db *database.Database, cache *cache.Cache, logger *zap.Logger, w
 
 // setupRoutes configures the HTTP routes
 func (g *Gateway) setupRoutes() {
-	// Middleware
+	// Security middleware (should be first to set headers on all responses)
+	securityConfig := DefaultSecurityConfig()
+	g.router.Use(SecurityMiddleware(securityConfig))
+	g.router.Use(APISecurityMiddleware())
+
+	// Request size limit (10MB max for inference requests)
+	g.router.Use(RequestSizeLimitMiddleware(10 * 1024 * 1024))
+
+	// Standard middleware
 	g.router.Use(middleware.RequestID)
 	g.router.Use(middleware.RealIP)
+	g.router.Use(g.requestIDResponseMiddleware) // Add request ID to responses
 	g.router.Use(g.loggerMiddleware)
 	g.router.Use(g.metricsMiddleware) // Add metrics middleware
 	g.router.Use(middleware.Recoverer)
 	g.router.Use(middleware.Timeout(60 * time.Second))
 
-	// CORS
+	// CORS - Updated with rate limit headers exposed
 	g.router.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000", "https://*.crosslogic.ai"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Admin-Token"},
-		ExposedHeaders:   []string{"Link"},
+		ExposedHeaders:   []string{"Link", "X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"},
 		AllowCredentials: true,
 		MaxAge:           300, // Maximum value not ignored by any of major browsers
 	}))
@@ -431,6 +440,13 @@ func (g *Gateway) loggerMiddleware(next http.Handler) http.Handler {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
 
+		// Anonymize API key in logs for security
+		authHeader := r.Header.Get("Authorization")
+		anonymizedAuth := ""
+		if authHeader != "" {
+			anonymizedAuth = AnonymizeAPIKey(strings.TrimPrefix(authHeader, "Bearer "))
+		}
+
 		g.logger.Info("request",
 			zap.String("request_id", middleware.GetReqID(r.Context())),
 			zap.String("method", r.Method),
@@ -438,7 +454,19 @@ func (g *Gateway) loggerMiddleware(next http.Handler) http.Handler {
 			zap.Int("status", ww.Status()),
 			zap.Duration("duration", time.Since(start)),
 			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("api_key_prefix", anonymizedAuth),
 		)
+	})
+}
+
+// requestIDResponseMiddleware adds the request ID to response headers
+func (g *Gateway) requestIDResponseMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := middleware.GetReqID(r.Context())
+		if reqID != "" {
+			w.Header().Set("X-Request-ID", reqID)
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -484,16 +512,23 @@ func (g *Gateway) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check rate limits
-		allowed, err := g.rateLimiter.CheckRateLimit(ctx, keyInfo)
+		// Check rate limits with info for headers
+		allowed, rateLimitInfo, err := g.rateLimiter.CheckRateLimitWithInfo(ctx, keyInfo)
 		if err != nil {
 			g.logger.Error("rate limit check failed", zap.Error(err))
 			g.writeError(w, http.StatusInternalServerError, "rate limit check failed")
 			return
 		}
 
+		// Always add rate limit headers (even when rejected)
+		if rateLimitInfo != nil {
+			for key, value := range rateLimitInfo.GetRateLimitHeaders() {
+				w.Header().Set(key, value)
+			}
+		}
+
 		if !allowed {
-			g.writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			g.writeRateLimitError(w, rateLimitInfo)
 			return
 		}
 
@@ -509,6 +544,23 @@ func (g *Gateway) rateLimitMiddleware(next http.Handler) http.Handler {
 		}(keyInfo.ID.String())
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+// writeRateLimitError writes a rate limit exceeded error with proper headers
+func (g *Gateway) writeRateLimitError(w http.ResponseWriter, info *RateLimitInfo) {
+	retryAfter := "60"
+	if info != nil && info.RetryAfter > 0 {
+		retryAfter = fmt.Sprintf("%d", info.RetryAfter)
+	}
+	w.Header().Set("Retry-After", retryAfter)
+
+	g.writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{
+		"error": map[string]interface{}{
+			"message":     "Rate limit exceeded. Please retry after the specified time.",
+			"type":        "rate_limit_error",
+			"retry_after": retryAfter,
+		},
 	})
 }
 
