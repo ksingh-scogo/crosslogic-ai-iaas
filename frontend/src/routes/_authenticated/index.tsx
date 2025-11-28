@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, CreditCard, DollarSign, Server, Rocket, Key, BarChart3, ArrowRight, Zap, CheckCircle2 } from 'lucide-react'
+import { Activity, CreditCard, DollarSign, Server, Rocket, Key, BarChart3 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -19,6 +19,9 @@ import { ConfigDrawer } from '@/components/config-drawer'
 import { fetchUsageHistory, fetchNodeSummaries } from '@/lib/api'
 import { UsageChart } from '@/components/dashboard/usage-chart'
 import { RecentActivity } from '@/components/dashboard/recent-activity'
+import { StatCard } from '@/components/dashboard/stat-card'
+import { QuickActionCard } from '@/components/dashboard/quick-action-card'
+import { EmptyStateCard } from '@/components/dashboard/empty-state'
 
 export const Route = createFileRoute('/_authenticated/')({
   component: DashboardPage,
@@ -87,125 +90,76 @@ function DashboardPage() {
           </div>
         </div>
 
-        <div className='space-y-4'>
+        <div className='space-y-6'>
           {/* Stats Cards */}
           <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
-            <Card>
-              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                <CardTitle className='text-sm font-medium'>
-                  Total Tokens
-                </CardTitle>
-                <Activity className='text-muted-foreground h-4 w-4' />
-              </CardHeader>
-              <CardContent>
-                <div className='text-2xl font-bold'>{totalTokens.toLocaleString()}</div>
-                <p className='text-muted-foreground text-xs'>
-                  Last 24 hours
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                <CardTitle className='text-sm font-medium'>
-                  Total Requests
-                </CardTitle>
-                <CreditCard className='text-muted-foreground h-4 w-4' />
-              </CardHeader>
-              <CardContent>
-                <div className='text-2xl font-bold'>{totalRequests.toLocaleString()}</div>
-                <p className='text-muted-foreground text-xs'>
-                  API calls processed
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                <CardTitle className='text-sm font-medium'>Active Nodes</CardTitle>
-                <Server className='text-muted-foreground h-4 w-4' />
-              </CardHeader>
-              <CardContent>
-                <div className='text-2xl font-bold'>{activeNodes}</div>
-                <p className='text-muted-foreground text-xs'>
-                  {nodes.length} total nodes
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                <CardTitle className='text-sm font-medium'>
-                  Total Cost
-                </CardTitle>
-                <DollarSign className='text-muted-foreground h-4 w-4' />
-              </CardHeader>
-              <CardContent>
-                <div className='text-2xl font-bold'>${totalCost.toFixed(2)}</div>
-                <p className='text-muted-foreground text-xs'>
-                  Last 24 hours
-                </p>
-              </CardContent>
-            </Card>
+            <StatCard
+              title='Total Tokens'
+              value={totalTokens.toLocaleString()}
+              description='Last 24 hours'
+              icon={Activity}
+              variant='primary'
+            />
+            <StatCard
+              title='Total Requests'
+              value={totalRequests.toLocaleString()}
+              description='API calls processed'
+              icon={CreditCard}
+              variant='info'
+            />
+            <StatCard
+              title='Active Nodes'
+              value={activeNodes}
+              description={`${nodes.length} total nodes`}
+              icon={Server}
+              variant='success'
+            />
+            <StatCard
+              title='Total Cost'
+              value={`$${totalCost.toFixed(2)}`}
+              description='Last 24 hours'
+              icon={DollarSign}
+              variant='warning'
+            />
           </div>
 
           {/* Quick Actions */}
-          <Card>
-            <CardHeader className='pb-3'>
+          <Card className='relative overflow-hidden'>
+            <div className='absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none' />
+            <CardHeader className='pb-3 relative z-10'>
               <CardTitle className='text-lg'>Quick Actions</CardTitle>
               <CardDescription>Common tasks to get you started</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className='relative z-10'>
               <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
-                <Link
-                  to='/launch'
-                  className='group flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50'
-                >
-                  <div className='rounded-md bg-primary/10 p-2'>
-                    <Rocket className='h-4 w-4 text-primary' />
-                  </div>
-                  <div className='flex-1'>
-                    <p className='text-sm font-medium'>Launch Instance</p>
-                    <p className='text-xs text-muted-foreground'>Deploy a model</p>
-                  </div>
-                  <ArrowRight className='h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100' />
-                </Link>
-                <Link
-                  to='/api-keys'
-                  className='group flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50'
-                >
-                  <div className='rounded-md bg-orange-500/10 p-2'>
-                    <Key className='h-4 w-4 text-orange-500' />
-                  </div>
-                  <div className='flex-1'>
-                    <p className='text-sm font-medium'>Create API Key</p>
-                    <p className='text-xs text-muted-foreground'>Generate credentials</p>
-                  </div>
-                  <ArrowRight className='h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100' />
-                </Link>
-                <Link
-                  to='/nodes'
-                  className='group flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50'
-                >
-                  <div className='rounded-md bg-green-500/10 p-2'>
-                    <Server className='h-4 w-4 text-green-500' />
-                  </div>
-                  <div className='flex-1'>
-                    <p className='text-sm font-medium'>View Nodes</p>
-                    <p className='text-xs text-muted-foreground'>Manage instances</p>
-                  </div>
-                  <ArrowRight className='h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100' />
-                </Link>
-                <Link
-                  to='/usage'
-                  className='group flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50'
-                >
-                  <div className='rounded-md bg-blue-500/10 p-2'>
-                    <BarChart3 className='h-4 w-4 text-blue-500' />
-                  </div>
-                  <div className='flex-1'>
-                    <p className='text-sm font-medium'>View Usage</p>
-                    <p className='text-xs text-muted-foreground'>Check analytics</p>
-                  </div>
-                  <ArrowRight className='h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100' />
-                </Link>
+                <QuickActionCard
+                  title='Launch Instance'
+                  description='Deploy a model'
+                  icon={Rocket}
+                  href='/launch'
+                  variant='primary'
+                />
+                <QuickActionCard
+                  title='Create API Key'
+                  description='Generate credentials'
+                  icon={Key}
+                  href='/api-keys'
+                  variant='warning'
+                />
+                <QuickActionCard
+                  title='View Nodes'
+                  description='Manage instances'
+                  icon={Server}
+                  href='/nodes'
+                  variant='success'
+                />
+                <QuickActionCard
+                  title='View Usage'
+                  description='Check analytics'
+                  icon={BarChart3}
+                  href='/usage'
+                  variant='info'
+                />
               </div>
             </CardContent>
           </Card>
@@ -234,55 +188,7 @@ function DashboardPage() {
           </div>
 
           {/* Getting Started (show when no active nodes) */}
-          {nodes.length === 0 && (
-            <Card className='border-dashed'>
-              <CardHeader className='text-center pb-2'>
-                <div className='mx-auto mb-2 rounded-full bg-primary/10 p-3 w-fit'>
-                  <Zap className='h-6 w-6 text-primary' />
-                </div>
-                <CardTitle>Get Started with CrossLogic AI</CardTitle>
-                <CardDescription className='max-w-md mx-auto'>
-                  Deploy your first AI model in minutes. Our platform handles infrastructure so you can focus on building.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className='pt-4'>
-                <div className='mx-auto max-w-lg space-y-3'>
-                  <div className='flex items-start gap-3'>
-                    <CheckCircle2 className='h-5 w-5 text-muted-foreground mt-0.5' />
-                    <div>
-                      <p className='font-medium text-sm'>1. Create an API Key</p>
-                      <p className='text-xs text-muted-foreground'>Generate credentials to authenticate your requests</p>
-                    </div>
-                  </div>
-                  <div className='flex items-start gap-3'>
-                    <CheckCircle2 className='h-5 w-5 text-muted-foreground mt-0.5' />
-                    <div>
-                      <p className='font-medium text-sm'>2. Launch a GPU Instance</p>
-                      <p className='text-xs text-muted-foreground'>Select a model and deploy to cloud GPUs</p>
-                    </div>
-                  </div>
-                  <div className='flex items-start gap-3'>
-                    <CheckCircle2 className='h-5 w-5 text-muted-foreground mt-0.5' />
-                    <div>
-                      <p className='font-medium text-sm'>3. Start Making Requests</p>
-                      <p className='text-xs text-muted-foreground'>Use our OpenAI-compatible API to generate completions</p>
-                    </div>
-                  </div>
-                </div>
-                <div className='mt-6 flex justify-center gap-3'>
-                  <Button asChild variant='outline'>
-                    <Link to='/api-keys'>Create API Key</Link>
-                  </Button>
-                  <Button asChild>
-                    <Link to='/launch'>
-                      <Rocket className='mr-2 h-4 w-4' />
-                      Launch Instance
-                    </Link>
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {nodes.length === 0 && <EmptyStateCard />}
         </div>
       </Main>
     </>

@@ -6,7 +6,7 @@
   --card-foreground: oklch(0.129 0.042 264.695);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.208 0.042 265.755);
+  --primary: oklch(0.45 0.18 260);
   --primary-foreground: oklch(0.984 0.003 247.858);
   --secondary: oklch(0.968 0.007 247.896);
   --secondary-foreground: oklch(0.208 0.042 265.755);
@@ -23,6 +23,21 @@
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
+
+  /* Premium accent colors */
+  --success: oklch(0.65 0.18 145);
+  --success-foreground: oklch(0.98 0.01 145);
+  --warning: oklch(0.75 0.15 85);
+  --warning-foreground: oklch(0.2 0.03 85);
+  --info: oklch(0.6 0.15 230);
+  --info-foreground: oklch(0.98 0.01 230);
+
+  /* Premium shadows */
+  --shadow-sm: 0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px oklch(0 0 0 / 0.1), 0 2px 4px -2px oklch(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px oklch(0 0 0 / 0.1), 0 4px 6px -4px oklch(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px oklch(0 0 0 / 0.1), 0 8px 10px -6px oklch(0 0 0 / 0.1);
+  --shadow-glow: 0 0 20px oklch(0.45 0.18 260 / 0.15);
 
   --sidebar: var(--background);
   --sidebar-foreground: var(--foreground);
@@ -41,7 +56,7 @@
   --card-foreground: oklch(0.984 0.003 247.858);
   --popover: oklch(0.208 0.042 265.755);
   --popover-foreground: oklch(0.984 0.003 247.858);
-  --primary: oklch(0.929 0.013 255.508);
+  --primary: oklch(0.65 0.18 260);
   --primary-foreground: oklch(0.208 0.042 265.755);
   --secondary: oklch(0.279 0.041 260.031);
   --secondary-foreground: oklch(0.984 0.003 247.858);
@@ -58,6 +73,21 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
+
+  /* Premium accent colors for dark mode */
+  --success: oklch(0.7 0.18 145);
+  --success-foreground: oklch(0.15 0.03 145);
+  --warning: oklch(0.8 0.15 85);
+  --warning-foreground: oklch(0.2 0.03 85);
+  --info: oklch(0.7 0.15 230);
+  --info-foreground: oklch(0.15 0.03 230);
+
+  /* Premium shadows for dark mode */
+  --shadow-sm: 0 1px 2px 0 oklch(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px oklch(0 0 0 / 0.4), 0 2px 4px -2px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 10px 15px -3px oklch(0 0 0 / 0.5), 0 4px 6px -4px oklch(0 0 0 / 0.4);
+  --shadow-xl: 0 20px 25px -5px oklch(0 0 0 / 0.6), 0 8px 10px -6px oklch(0 0 0 / 0.5);
+  --shadow-glow: 0 0 30px oklch(0.65 0.18 260 / 0.3);
 }
 
 @theme inline {
