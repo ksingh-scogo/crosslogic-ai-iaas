@@ -1,7 +1,12 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Rocket, Cloud, Zap, MapPin, Cpu, HardDrive, Brain, CheckCircle2, Sparkles } from 'lucide-react'
+import { Rocket, Zap, MapPin, Cpu, HardDrive, Brain, CheckCircle2, Sparkles } from 'lucide-react'
+
+// Cloud provider icons
+import awsIcon from '@/assets/images/aws_icon.png'
+import azureIcon from '@/assets/images/azure_icon.png'
+import gcpIcon from '@/assets/images/gcp_icon.png'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -200,36 +205,37 @@ function LaunchPage() {
               <CardContent className='space-y-6'>
                 <div className='grid gap-4 sm:grid-cols-3'>
                   {[
-                    { id: 'azure', name: 'Azure', color: 'from-blue-500 to-cyan-500' },
-                    { id: 'aws', name: 'AWS', color: 'from-orange-500 to-amber-500' },
-                    { id: 'gcp', name: 'GCP', color: 'from-green-500 to-emerald-500' },
+                    { id: 'azure', name: 'Azure', icon: azureIcon, bgColor: 'bg-blue-50 dark:bg-blue-950/30' },
+                    { id: 'aws', name: 'AWS', icon: awsIcon, bgColor: 'bg-orange-50 dark:bg-orange-950/30' },
+                    { id: 'gcp', name: 'GCP', icon: gcpIcon, bgColor: 'bg-emerald-50 dark:bg-emerald-950/30' },
                   ].map((provider) => (
                     <div
                       key={provider.id}
                       onClick={() => setConfig({ ...config, provider: provider.id })}
                       className={cn(
-                        'group cursor-pointer rounded-xl border-2 p-4 text-center transition-all duration-300',
-                        'hover:shadow-lg hover:-translate-y-0.5',
+                        'group relative cursor-pointer rounded-xl border-2 p-5 text-center transition-all duration-300',
+                        'hover:shadow-lg hover:-translate-y-1',
                         config.provider === provider.id
-                          ? 'border-primary bg-primary/5 shadow-lg'
-                          : 'border-border hover:border-primary/40'
+                          ? 'border-primary bg-primary/5 shadow-lg shadow-primary/10'
+                          : 'border-border hover:border-primary/40 hover:bg-accent/30'
                       )}
                     >
-                      <div className={cn(
-                        'mx-auto h-12 w-12 rounded-xl flex items-center justify-center mb-3 transition-all duration-300',
-                        'bg-gradient-to-br',
-                        config.provider === provider.id ? provider.color : 'from-muted to-muted',
-                        'group-hover:' + provider.color
-                      )}>
-                        <Cloud className={cn(
-                          'h-6 w-6 transition-colors duration-300',
-                          config.provider === provider.id ? 'text-white' : 'text-muted-foreground group-hover:text-white'
-                        )} />
-                      </div>
-                      <p className='font-semibold'>{provider.name}</p>
                       {config.provider === provider.id && (
-                        <Badge className='mt-2'>Selected</Badge>
+                        <div className='absolute top-3 right-3 rounded-full bg-primary p-1 animate-scale-in'>
+                          <CheckCircle2 className='h-4 w-4 text-primary-foreground' />
+                        </div>
                       )}
+                      <div className={cn(
+                        'mx-auto h-16 w-16 rounded-xl flex items-center justify-center mb-3 transition-all duration-300',
+                        config.provider === provider.id ? provider.bgColor : 'bg-muted/50 group-hover:bg-muted'
+                      )}>
+                        <img
+                          src={provider.icon}
+                          alt={`${provider.name} logo`}
+                          className='h-10 w-10 object-contain'
+                        />
+                      </div>
+                      <p className='font-semibold text-base'>{provider.name}</p>
                     </div>
                   ))}
                 </div>
@@ -394,7 +400,11 @@ function LaunchPage() {
                   <div className='flex items-center justify-between py-2 border-b'>
                     <p className='text-sm text-muted-foreground'>Provider</p>
                     <div className='flex items-center gap-2'>
-                      <Cloud className='h-4 w-4 text-muted-foreground' />
+                      <img
+                        src={config.provider === 'azure' ? azureIcon : config.provider === 'aws' ? awsIcon : gcpIcon}
+                        alt={`${config.provider} logo`}
+                        className='h-5 w-5 object-contain'
+                      />
                       <p className='font-medium text-sm capitalize'>{config.provider}</p>
                     </div>
                   </div>

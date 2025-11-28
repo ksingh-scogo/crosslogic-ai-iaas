@@ -62,10 +62,48 @@ CREATE INDEX IF NOT EXISTS idx_instance_types_available ON instance_types(is_ava
 CREATE INDEX IF NOT EXISTS idx_region_instance_region_code ON region_instance_availability(region_code);
 CREATE INDEX IF NOT EXISTS idx_region_instance_instance_type_id ON region_instance_availability(instance_type_id);
 
--- Update existing regions with provider information
-UPDATE regions SET provider = 'azure' WHERE code IN ('eastus', 'eastus2', 'westus', 'westus2', 'centralus', 'northcentralus', 'southcentralus', 'westeurope', 'northeurope', 'southeastasia', 'japaneast', 'australiaeast');
-UPDATE regions SET provider = 'aws' WHERE code IN ('us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-northeast-1', 'ap-southeast-2');
-UPDATE regions SET provider = 'gcp' WHERE code IN ('us-central1', 'us-east1', 'us-west1', 'us-west4', 'europe-west1', 'europe-west4', 'asia-southeast1', 'asia-northeast1', 'australia-southeast1');
+-- Insert cloud-specific regions with proper provider codes
+-- Azure Regions
+INSERT INTO regions (code, name, country, city, cloud_providers, cost_multiplier, provider) VALUES
+('eastus', 'East US', 'USA', 'Virginia', '["azure"]', 1.0, 'azure'),
+('eastus2', 'East US 2', 'USA', 'Virginia', '["azure"]', 1.0, 'azure'),
+('westus', 'West US', 'USA', 'California', '["azure"]', 1.0, 'azure'),
+('westus2', 'West US 2', 'USA', 'Washington', '["azure"]', 1.0, 'azure'),
+('centralus', 'Central US', 'USA', 'Iowa', '["azure"]', 0.95, 'azure'),
+('northcentralus', 'North Central US', 'USA', 'Illinois', '["azure"]', 0.95, 'azure'),
+('southcentralus', 'South Central US', 'USA', 'Texas', '["azure"]', 0.95, 'azure'),
+('westeurope', 'West Europe', 'Netherlands', 'Amsterdam', '["azure"]', 1.1, 'azure'),
+('northeurope', 'North Europe', 'Ireland', 'Dublin', '["azure"]', 1.05, 'azure'),
+('southeastasia', 'Southeast Asia', 'Singapore', 'Singapore', '["azure"]', 0.9, 'azure'),
+('japaneast', 'Japan East', 'Japan', 'Tokyo', '["azure"]', 1.1, 'azure'),
+('australiaeast', 'Australia East', 'Australia', 'Sydney', '["azure"]', 1.1, 'azure')
+ON CONFLICT (code) DO UPDATE SET provider = EXCLUDED.provider;
+
+-- AWS Regions
+INSERT INTO regions (code, name, country, city, cloud_providers, cost_multiplier, provider) VALUES
+('us-east-1', 'US East (N. Virginia)', 'USA', 'Virginia', '["aws"]', 1.0, 'aws'),
+('us-east-2', 'US East (Ohio)', 'USA', 'Ohio', '["aws"]', 0.95, 'aws'),
+('us-west-1', 'US West (N. California)', 'USA', 'California', '["aws"]', 1.05, 'aws'),
+('us-west-2', 'US West (Oregon)', 'USA', 'Oregon', '["aws"]', 1.0, 'aws'),
+('eu-west-1', 'EU (Ireland)', 'Ireland', 'Dublin', '["aws"]', 1.05, 'aws'),
+('eu-central-1', 'EU (Frankfurt)', 'Germany', 'Frankfurt', '["aws"]', 1.1, 'aws'),
+('ap-southeast-1', 'Asia Pacific (Singapore)', 'Singapore', 'Singapore', '["aws"]', 0.95, 'aws'),
+('ap-northeast-1', 'Asia Pacific (Tokyo)', 'Japan', 'Tokyo', '["aws"]', 1.1, 'aws'),
+('ap-southeast-2', 'Asia Pacific (Sydney)', 'Australia', 'Sydney', '["aws"]', 1.1, 'aws')
+ON CONFLICT (code) DO UPDATE SET provider = EXCLUDED.provider;
+
+-- GCP Regions
+INSERT INTO regions (code, name, country, city, cloud_providers, cost_multiplier, provider) VALUES
+('us-central1', 'US Central (Iowa)', 'USA', 'Iowa', '["gcp"]', 0.95, 'gcp'),
+('us-east1', 'US East (South Carolina)', 'USA', 'South Carolina', '["gcp"]', 1.0, 'gcp'),
+('us-west1', 'US West (Oregon)', 'USA', 'Oregon', '["gcp"]', 1.0, 'gcp'),
+('us-west4', 'US West (Las Vegas)', 'USA', 'Nevada', '["gcp"]', 1.0, 'gcp'),
+('europe-west1', 'Europe West (Belgium)', 'Belgium', 'St. Ghislain', '["gcp"]', 1.05, 'gcp'),
+('europe-west4', 'Europe West (Netherlands)', 'Netherlands', 'Eemshaven', '["gcp"]', 1.05, 'gcp'),
+('asia-southeast1', 'Asia Southeast (Singapore)', 'Singapore', 'Singapore', '["gcp"]', 0.95, 'gcp'),
+('asia-northeast1', 'Asia Northeast (Tokyo)', 'Japan', 'Tokyo', '["gcp"]', 1.1, 'gcp'),
+('australia-southeast1', 'Australia Southeast (Sydney)', 'Australia', 'Sydney', '["gcp"]', 1.1, 'gcp')
+ON CONFLICT (code) DO UPDATE SET provider = EXCLUDED.provider;
 
 -- Insert Azure GPU Instance Types
 INSERT INTO instance_types (provider, instance_type, instance_name, vcpu_count, memory_gb, gpu_count, gpu_memory_gb, gpu_model, gpu_compute_capability, price_per_hour, spot_price_per_hour) VALUES
